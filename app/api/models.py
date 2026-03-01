@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 class UploadedFileModel(BaseModel):
     """File metadata mirroring graphs/planning/state.py UploadedFile TypedDict."""
-    object_id: str
+    object_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
     filename: str
     mime_type: str
 
@@ -41,10 +41,10 @@ class ToolsEnabledModel(BaseModel):
 
 class PlanRequest(BaseModel):
     """Request body for the planning endpoint."""
-    topic: str = Field(..., min_length=1, description="Research topic / question")
-    tenant_id: str
-    user_id: str
-    chat_bot_id: str
+    topic: str = Field(..., min_length=1, max_length=5000, description="Research topic / question")
+    tenant_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
+    user_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
+    chat_bot_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
     chat_history: list[ChatMessageModel] = Field(default_factory=list)
     uploaded_files: list[UploadedFileModel] = Field(default_factory=list)
     # Populated on second call (after user answers clarifying questions)
@@ -83,8 +83,8 @@ class RunRequest(BaseModel):
     Loads the approved plan from deep_research_jobs by job_id and queues execution.
     """
     job_id: str
-    tenant_id: str
-    user_id: str
+    tenant_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
+    user_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
     action: Literal["approve"] = "approve"
 
 

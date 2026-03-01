@@ -226,6 +226,11 @@ class Settings(BaseSettings):
     partial_failure_threshold: float = 0.5
 
     # ------------------------------------------------------------------
+    # CORS
+    # ------------------------------------------------------------------
+    cors_origins: list[str] = ["*"]   # override via CORS_ORIGINS='["https://app.example.com"]'
+
+    # ------------------------------------------------------------------
     # Rate limits (None = unlimited — revisit once tenancy model is set)
     # ------------------------------------------------------------------
     rate_limit_plan_per_hour: int | None = None

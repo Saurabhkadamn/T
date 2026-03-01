@@ -154,7 +154,11 @@ async def clarifier(state: PlanningState, config: RunnableConfig | None = None) 
         state.get("topic_id"),
     )
 
-    response = await llm.ainvoke(messages)
+    try:
+        response = await llm.ainvoke(messages)
+    except Exception as exc:
+        logger.error("clarifier: LLM call failed — %s", exc)
+        return {"status": "failed", "error": f"clarifier: LLM call failed — {exc}"}
 
     try:
         questions = _parse_questions(response.content)

@@ -20,6 +20,8 @@ Flow
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -45,12 +47,13 @@ _RATE_LIMIT_SCRIPT = """
 local key = KEYS[1]
 local limit = tonumber(ARGV[1])
 local ttl = tonumber(ARGV[2])
-local current = tonumber(redis.call('GET', key) or '0')
-if current >= limit then
+local current = redis.call('INCR', key)
+if current == 1 then
+    redis.call('EXPIRE', key, ttl)
+end
+if current > limit then
     return 0
 end
-redis.call('INCR', key)
-redis.call('EXPIRE', key, ttl)
 return 1
 """
 
@@ -143,10 +146,19 @@ async def plan(
 
     # ── Run planning graph ─────────────────────────────────────────────────
     try:
-        result = await planning_graph.ainvoke(
-            initial_state,
-            config={"configurable": {"thread_id": job_id}},
+        result = await asyncio.wait_for(
+            planning_graph.ainvoke(
+                initial_state,
+                config={"configurable": {"thread_id": job_id}},
+            ),
+            timeout=120,
         )
+    except asyncio.TimeoutError as exc:
+        logger.error("plan: planning graph timed out after 120s (job_id=%s)", job_id)
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Planning timed out. Please try again.",
+        ) from exc
     except Exception as exc:
         logger.exception("plan: planning graph raised an exception")
         raise HTTPException(
@@ -185,7 +197,7 @@ async def plan(
             "llm_model": llm_model,
             "status": "plans_ready",
             "progress": 0,
-            "plan": dict(result["plan"]) if result.get("plan") else None,
+            "plan": copy.deepcopy(result["plan"]) if result.get("plan") else None,
             "checklist": result.get("checklist", []),
             "analysis": {
                 "depth_of_research": result.get("depth_of_research", "intermediate"),
@@ -197,7 +209,12 @@ async def plan(
                 "assumptions": result.get("assumptions", []),
             },
             "uploaded_files": [f.model_dump() for f in body.uploaded_files],
-            "tools_enabled": {},
+            "tools_enabled": {
+                "web": "web" in (result.get("source_scope") or []),
+                "arxiv": "arxiv" in (result.get("source_scope") or []),
+                "content_lake": "content_lake" in (result.get("source_scope") or []),
+                "files": "files" in (result.get("source_scope") or []),
+            },
             "metadata": {
                 "otel_trace_id": "",
                 "total_tokens_used": 0,

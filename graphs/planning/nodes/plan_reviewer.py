@@ -184,19 +184,26 @@ async def plan_reviewer(state: PlanningState, config: RunnableConfig | None = No
         state.get("topic_id"),
     )
 
-    response = await llm.ainvoke(messages)
-
     try:
-        parsed = _parse_response(response.content)
-    except (json.JSONDecodeError, ValueError) as exc:
-        logger.warning(
-            "plan_reviewer: unparseable response (%s) — auto-approving plan (topic_id=%s)",
-            exc,
-            state.get("topic_id"),
-        )
-        # Model returned empty/invalid JSON — the plan was already created so
-        # it is safe to approve it and let the human review it instead.
+        response = await llm.ainvoke(messages)
+    except Exception as exc:
+        logger.warning("plan_reviewer: LLM call failed (%s) — auto-approving plan", exc)
+        response = None
+
+    if response is None:
         parsed = {"verdict": "approve", "issues": [], "checklist": []}
+    else:
+        try:
+            parsed = _parse_response(response.content)
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning(
+                "plan_reviewer: unparseable response (%s) — auto-approving plan (topic_id=%s)",
+                exc,
+                state.get("topic_id"),
+            )
+            # Model returned empty/invalid JSON — the plan was already created so
+            # it is safe to approve it and let the human review it instead.
+            parsed = {"verdict": "approve", "issues": [], "checklist": []}
 
     verdict: str = parsed.get("verdict", "approve")
     checklist: list[str] = parsed.get("checklist") or []

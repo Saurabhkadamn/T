@@ -244,7 +244,11 @@ async def plan_creator(state: PlanningState, config: RunnableConfig | None = Non
         state.get("topic_id"),
     )
 
-    response = await llm.ainvoke(messages)
+    try:
+        response = await llm.ainvoke(messages)
+    except Exception as exc:
+        logger.error("plan_creator: LLM call failed — %s", exc)
+        return {"status": "failed", "error": f"plan_creator: LLM call failed — {exc}"}
 
     try:
         plan = _parse_plan(response.content)

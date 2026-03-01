@@ -183,7 +183,12 @@ async def query_analyzer(state: PlanningState, config: RunnableConfig | None = N
         state.get("topic_id"),
     )
 
-    response = await llm.ainvoke(messages)
+    try:
+        response = await llm.ainvoke(messages)
+    except Exception as exc:
+        logger.error("query_analyzer: LLM call failed — %s", exc)
+        return {"status": "failed", "error": f"query_analyzer: LLM call failed — {exc}"}
+
     raw_text: str = response.content
 
     try:
