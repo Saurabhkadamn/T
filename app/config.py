@@ -231,6 +231,11 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["*"]   # override via CORS_ORIGINS='["https://app.example.com"]'
 
     # ------------------------------------------------------------------
+    # Planning graph timeout
+    # ------------------------------------------------------------------
+    planning_timeout_seconds: int = 180
+
+    # ------------------------------------------------------------------
     # Rate limits (None = unlimited — revisit once tenancy model is set)
     # ------------------------------------------------------------------
     rate_limit_plan_per_hour: int | None = None

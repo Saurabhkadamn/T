@@ -49,9 +49,15 @@ class PlanRequest(BaseModel):
     uploaded_files: list[UploadedFileModel] = Field(default_factory=list)
     # Populated on second call (after user answers clarifying questions)
     clarification_answers: list[str] = Field(default_factory=list)
+    # Echo the questions received in the previous PlanResponse so the graph
+    # doesn't re-ask them on re-invocation.
+    clarification_questions: list[str] = Field(default_factory=list)
     # Re-invoke token — equals the job_id from the first PlanResponse.
     # None on first call; client sends back the same job_id on clarification round.
-    job_id: Optional[str] = None
+    job_id: Optional[str] = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    )
 
 
 class PlanResponse(BaseModel):

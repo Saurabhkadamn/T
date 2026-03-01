@@ -58,24 +58,62 @@ return 1
 """
 
 
-async def _check_rate_limit(
+async def _check_rate_limit_readonly(
     redis: Redis,
     tenant_id: str,
     user_id: str,
 ) -> None:
-    """Raise HTTP 429 if the tenant/user has exceeded the plan rate limit."""
+    """Pre-flight read-only check — does NOT increment the counter.
+
+    Rejects immediately if the user is already at or over their limit.
+    Fails open on Redis errors so a cache outage never blocks planning.
+    """
+    limit = settings.rate_limit_plan_per_hour
+    if limit is None:
+        return  # unlimited
+
+    key = f"rate:plan:{tenant_id}:{user_id}"
+    try:
+        current_str = await redis.get(key)
+        current = int(current_str or 0)
+        if current >= limit:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Plan rate limit exceeded. Try again later.",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("plan: rate-limit Redis error in pre-check (failing open) — %s", exc)
+
+
+async def _consume_rate_limit(
+    redis: Redis,
+    tenant_id: str,
+    user_id: str,
+) -> None:
+    """Post-graph: increment counter and enforce limit.
+
+    Called after a successful graph run so that timeouts and errors never
+    consume a quota slot.  Fails open on Redis errors.
+    """
     limit = settings.rate_limit_plan_per_hour
     if limit is None:
         return  # unlimited
 
     key = f"rate:plan:{tenant_id}:{user_id}"
     ttl = settings.redis_ttls.rate_limit_plan_ttl_seconds
-    allowed = await redis.eval(_RATE_LIMIT_SCRIPT, 1, key, limit, ttl)
-    if not allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Plan rate limit exceeded. Try again later.",
-        )
+    try:
+        allowed = await redis.eval(_RATE_LIMIT_SCRIPT, 1, key, limit, ttl)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Plan rate limit exceeded. Try again later.",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("plan: rate-limit Redis error in consume (failing open) — %s", exc)
 
 
 @router.post(
@@ -96,8 +134,8 @@ async def plan(
             detail="tenant_id in body must match X-Tenant-ID header",
         )
 
-    # ── Rate limiting ──────────────────────────────────────────────────────
-    await _check_rate_limit(redis, tenant_id, body.user_id)
+    # ── Rate limiting (pre-flight read-only check — no slot burned yet) ───
+    await _check_rate_limit_readonly(redis, tenant_id, body.user_id)
 
     # ── Determine job_id ──────────────────────────────────────────────────
     # New session → generate; continuation (answering clarifications) → reuse
@@ -125,9 +163,9 @@ async def plan(
         "original_topic": body.topic,
         "refined_topic": "",
         "needs_clarification": False,
-        "clarification_questions": [],
+        "clarification_questions": list(body.clarification_questions),
         "clarification_answers": list(body.clarification_answers),
-        "clarification_count": 0,
+        "clarification_count": len(body.clarification_answers),
         "depth_of_research": "intermediate",
         "audience": "",
         "objective": "",
@@ -156,10 +194,14 @@ async def plan(
                     },
                 },
             ),
-            timeout=120,
+            timeout=settings.planning_timeout_seconds,
         )
     except asyncio.TimeoutError as exc:
-        logger.error("plan: planning graph timed out after 120s (job_id=%s)", job_id)
+        logger.error(
+            "plan: planning graph timed out after %ds (job_id=%s)",
+            settings.planning_timeout_seconds,
+            job_id,
+        )
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail="Planning timed out. Please try again.",
@@ -170,6 +212,9 @@ async def plan(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Planning graph error: {exc}",
         ) from exc
+
+    # ── Consume rate-limit slot (only on successful graph completion) ──────
+    await _consume_rate_limit(redis, tenant_id, body.user_id)
 
     # ── Map final state → response ─────────────────────────────────────────
     if result.get("status") == "failed":
@@ -184,12 +229,12 @@ async def plan(
     # ── Save to DB on plan ready ───────────────────────────────────────────
     # Only insert when the plan is fully reviewed and ready for approval.
     # On clarification loops (needs_clarification=True) the job is not saved yet.
-    if graph_status == "awaiting_approval" and result.get("plan"):
+    if result.get("plan") and graph_status not in ("failed", "needs_clarification"):
         now_iso = datetime.now(timezone.utc).isoformat()
         llm_model = (
             settings.llm_provider
             + "/"
-            + settings.models.model_for("plan_creation")
+            + settings.models.model_for_provider("plan_creation", settings.llm_provider)
         )
         job_doc = {
             "job_id": job_id,
@@ -242,7 +287,10 @@ async def plan(
             )
         except Exception as exc:
             logger.error("plan: failed to save deep_research_jobs — %s", exc)
-            # Non-fatal: still return the plan to the client
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to persist plan. Please try again.",
+            ) from exc
 
     # ── Build analysis object for response ─────────────────────────────────
     analysis_dict: dict | None = None
