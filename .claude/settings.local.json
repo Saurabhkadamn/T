@@ -5,7 +5,8 @@
       "Bash(python3:*)",
       "Bash(ls FOUND:*)",
       "Bash(pip install:*)",
-      "Bash(set GEMINI_API_KEY=AIzaSyC5-EHPPgxwaYg9VEyyu6SgOEbq12pKk94:*)"
+      "Bash(set GEMINI_API_KEY=AIzaSyC5-EHPPgxwaYg9VEyyu6SgOEbq12pKk94:*)",
+      "Bash(curl:*)"
     ]
   }
 }
