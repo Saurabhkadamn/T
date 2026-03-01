@@ -80,19 +80,31 @@ def _extract_summary(html: str, max_chars: int = 500) -> str:
     return text[:max_chars]
 
 
+_s3_client = None
+_mongo_client: AsyncIOMotorClient | None = None
+
+
 def _get_s3_client():
-    return boto3.client(
-        "s3",
-        config=BotocoreConfig(
-            connect_timeout=10,
-            read_timeout=30,
-            retries={"max_attempts": 3, "mode": "standard"},
-        ),
-    )
+    global _s3_client
+    if _s3_client is None:
+        _s3_client = boto3.client(
+            "s3",
+            config=BotocoreConfig(
+                connect_timeout=10,
+                read_timeout=30,
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
+        )
+    return _s3_client
 
 
 def _get_mongo_client() -> AsyncIOMotorClient:
-    return AsyncIOMotorClient(settings.mongo_uri, serverSelectionTimeoutMS=5_000)
+    global _mongo_client
+    if _mongo_client is None:
+        _mongo_client = AsyncIOMotorClient(
+            settings.mongo_uri, serverSelectionTimeoutMS=5_000
+        )
+    return _mongo_client
 
 
 async def _upload_to_s3(
@@ -365,8 +377,6 @@ async def exporter(
         )
         errors.append(f"MongoDB write error: {exc}")
         final_status = "partial_success"
-    finally:
-        mongo_client.close()
 
     # ------------------------------------------------------------------
     # 5. Redis status update + pub/sub

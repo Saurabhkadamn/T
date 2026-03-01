@@ -43,12 +43,13 @@ _RATE_LIMIT_SCRIPT = """
 local key = KEYS[1]
 local limit = tonumber(ARGV[1])
 local ttl = tonumber(ARGV[2])
-local current = tonumber(redis.call('GET', key) or '0')
-if current >= limit then
+local current = redis.call('INCR', key)
+if current == 1 then
+    redis.call('EXPIRE', key, ttl)
+end
+if current > limit then
     return 0
 end
-redis.call('INCR', key)
-redis.call('EXPIRE', key, ttl)
 return 1
 """
 
@@ -205,6 +206,7 @@ async def run(
             mapping={
                 "status": "research_queued",
                 "progress": "0",
+                "tenant_id": tenant_id,
                 "updated_at": now_iso,
             },
         )

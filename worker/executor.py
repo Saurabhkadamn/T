@@ -53,7 +53,9 @@ async def run(job_id: str) -> None:
     """
     streamer = JobStreamer(job_id)
     mongo_client: AsyncIOMotorClient | None = None
+    redis_client: aioredis.Redis | None = None
     checkpointer = None
+    tenant_id: str = ""  # captured early so error handler can use it
 
     try:
         await streamer.connect()
@@ -61,13 +63,18 @@ async def run(job_id: str) -> None:
 
         # ── 1. Load job document ───────────────────────────────────────────
         mongo_client = AsyncIOMotorClient(settings.mongo_uri)
+        redis_client = aioredis.Redis(
+            host=settings.redis_host,
+            password=settings.redis_password or None,
+            decode_responses=True,
+        )
         db = mongo_client[_DB_NAME]
 
         job_doc = await db["deep_research_jobs"].find_one({"job_id": job_id})
         if job_doc is None:
             raise ValueError(f"Job {job_id!r} not found in deep_research_jobs")
 
-        tenant_id: str = job_doc["tenant_id"]
+        tenant_id = job_doc["tenant_id"]
 
         # ── 2. Load file contents from Redis ───────────────────────────────
         uploaded_files: list[dict] = job_doc.get("uploaded_files", [])
@@ -136,16 +143,10 @@ async def run(job_id: str) -> None:
 
         # Persist started_at to Redis status hash for the fast-path status endpoint
         try:
-            r = aioredis.Redis(
-                host=settings.redis_host,
-                password=settings.redis_password or None,
-                decode_responses=True,
+            await redis_client.hset(
+                f"job:{job_id}:status",
+                mapping={"started_at": started_at},
             )
-            async with r:
-                await r.hset(
-                    f"job:{job_id}:status",
-                    mapping={"started_at": started_at},
-                )
         except Exception as exc:
             logger.warning("executor: could not write started_at to Redis — %s", exc)
 
@@ -232,8 +233,9 @@ async def run(job_id: str) -> None:
         if mongo_client is not None:
             try:
                 db = mongo_client[_DB_NAME]
-                # tenant_id may not be set if the job doc lookup failed
                 update_filter: dict = {"job_id": job_id}
+                if tenant_id:
+                    update_filter["tenant_id"] = tenant_id
                 await db["deep_research_jobs"].update_one(
                     update_filter,
                     {
@@ -251,6 +253,11 @@ async def run(job_id: str) -> None:
         if checkpointer is not None:
             try:
                 await checkpointer.aclose()
+            except Exception:
+                pass
+        if redis_client is not None:
+            try:
+                await redis_client.aclose()
             except Exception:
                 pass
         if mongo_client is not None:

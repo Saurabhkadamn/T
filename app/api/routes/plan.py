@@ -149,7 +149,12 @@ async def plan(
         result = await asyncio.wait_for(
             planning_graph.ainvoke(
                 initial_state,
-                config={"configurable": {"thread_id": job_id}},
+                config={
+                    "configurable": {
+                        "thread_id": job_id,
+                        "redis_client": redis,
+                    },
+                },
             ),
             timeout=120,
         )

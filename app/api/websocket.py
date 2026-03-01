@@ -30,14 +30,14 @@ import json
 import logging
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
-
-from app.config import settings
+from motor.motor_asyncio import AsyncIOMotorClient
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 _TERMINAL_EVENTS = {"completed", "error"}
+_DB_NAME = "kadal_platform"
 
 
 @router.websocket("/ws/deep-research/{job_id}")
@@ -50,15 +50,31 @@ async def deep_research_ws(
     await websocket.accept()
     logger.info("ws: client connected job_id=%s tenant_id=%s", job_id, tenant_id)
 
-    import redis.asyncio as aioredis
-
-    pubsub_client = aioredis.Redis(
-        host=settings.redis_host,
-        password=settings.redis_password or None,
-        decode_responses=True,
-    )
-    pubsub = pubsub_client.pubsub()
+    # Use the shared Redis client from app state — no new connection per request.
+    redis_client = websocket.app.state.redis
+    pubsub = redis_client.pubsub()
     channel = f"job:{job_id}:events"
+
+    # ── Tenant ID authorization ────────────────────────────────────────────
+    stored_tenant: str | None = await redis_client.hget(
+        f"job:{job_id}:status", "tenant_id"
+    )
+    if stored_tenant is None:
+        # Redis cache miss — fall back to MongoDB
+        mongo: AsyncIOMotorClient = websocket.app.state.mongo
+        doc = await mongo[_DB_NAME]["deep_research_jobs"].find_one(
+            {"job_id": job_id}, {"tenant_id": 1}
+        )
+        stored_tenant = doc["tenant_id"] if doc else None
+
+    if stored_tenant != tenant_id:
+        logger.warning(
+            "ws: tenant_id mismatch — closing job_id=%s "
+            "(got=%r expected=%r)",
+            job_id, tenant_id, stored_tenant,
+        )
+        await websocket.close(code=4403)
+        return
 
     try:
         await pubsub.subscribe(channel)
@@ -104,7 +120,7 @@ async def deep_research_ws(
     finally:
         try:
             await pubsub.unsubscribe(channel)
-            await pubsub_client.aclose()
+            await pubsub.aclose()
         except Exception:
             pass
         logger.info("ws: connection cleaned up job_id=%s", job_id)

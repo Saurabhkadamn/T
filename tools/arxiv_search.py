@@ -90,7 +90,7 @@ async def arxiv_search(
 
     client = arxiv.Client()
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     papers = await loop.run_in_executor(None, lambda: list(client.results(search)))
 
     results: List[RawSearchResult] = []

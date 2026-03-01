@@ -60,6 +60,8 @@ async def context_builder(state: PlanningState, config: RunnableConfig | None = 
     ----------
     state:  current PlanningState snapshot (read-only inside the node).
     config: LangGraph run-time config dict (carries ``configurable`` sub-dict).
+            Pass a shared Redis client via config["configurable"]["redis_client"]
+            to avoid opening a new connection per invocation.
 
     Returns
     -------
@@ -75,14 +77,21 @@ async def context_builder(state: PlanningState, config: RunnableConfig | None = 
         )
         return {"file_contents": {}}
 
-    # Build Redis client from settings — no singleton here; the worker's
-    # lifespan manager should inject a shared client via config if desired,
-    # but for now we open a short-lived connection per node call.
-    redis_client: aioredis.Redis = aioredis.Redis(
-        host=settings.redis_host,
-        password=settings.redis_password or None,
-        decode_responses=True,
-    )
+    # Prefer a shared Redis client injected via LangGraph config; fall back to
+    # creating a short-lived connection so the node remains testable in isolation.
+    configurable: dict = (config or {}).get("configurable", {}) if config else {}
+    shared_client: aioredis.Redis | None = configurable.get("redis_client")
+    owns_client = shared_client is None
+
+    redis_client: aioredis.Redis
+    if shared_client is not None:
+        redis_client = shared_client
+    else:
+        redis_client = aioredis.Redis(
+            host=settings.redis_host,
+            password=settings.redis_password or None,
+            decode_responses=True,
+        )
 
     file_contents: dict[str, str] = {}
 
@@ -108,7 +117,8 @@ async def context_builder(state: PlanningState, config: RunnableConfig | None = 
                     object_id,
                 )
     finally:
-        await redis_client.aclose()
+        if owns_client:
+            await redis_client.aclose()
 
     logger.info(
         "context_builder: loaded content for %d/%d files (topic_id=%s)",
