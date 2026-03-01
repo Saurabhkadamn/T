@@ -79,7 +79,7 @@ Previous clarification rounds: {clarification_count}
 
 ---
 
-Generate up to 3 clarifying questions that, when answered, would remove
+Generate clarifying questions that, when answered, would remove
 the most critical ambiguities from this research request.
 
 Do NOT ask about things already covered by the assumptions above.
