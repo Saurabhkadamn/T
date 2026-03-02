@@ -33,10 +33,9 @@ Output fields written:  source_scores, section_findings, section_citations,
 
 from __future__ import annotations
 
-import hashlib
+import asyncio
 import json
 import logging
-import uuid
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -44,7 +43,9 @@ from urllib.parse import urlparse
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from app.config import settings
 from app.llm_factory import get_llm
+from graphs.execution._url_utils import url_hash as _url_hash_fn
 from graphs.execution.state import (
     Citation,
     CompressedFinding,
@@ -110,10 +111,9 @@ Return:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _url_hash(url: str) -> str:
-    if not url:
-        return hashlib.sha256(str(uuid.uuid4()).encode()).hexdigest()
-    return hashlib.sha256(url.lower().rstrip("/").encode()).hexdigest()
+def _clamp(v: float) -> float:
+    """Clamp a score to [0.0, 1.0] to guard against out-of-range LLM output."""
+    return max(0.0, min(1.0, v))
 
 
 def _extract_domain(url: str) -> str:
@@ -214,8 +214,16 @@ async def scorer(
             HumanMessage(content=user_prompt),
         ]
         try:
-            response = await llm.ainvoke(messages)
+            response = await asyncio.wait_for(
+                llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+            )
             llm_scores = _parse_llm_scores(response.content)
+        except asyncio.TimeoutError:
+            logger.error(
+                "scorer: LLM timed out after %ds (section_id=%s)",
+                settings.llm_timeout_seconds, section_id,
+            )
+            # Non-fatal: default scores applied below.
         except Exception as exc:
             logger.error(
                 "scorer: LLM call failed — %s (section_id=%s)", exc, section_id
@@ -229,20 +237,27 @@ async def scorer(
     source_scores: list[SourceScore] = []
 
     for idx, r in enumerate(raw_results, start=1):
+        url = r.get("url", "")
+        h = _url_hash_fn(url)
+        # Skip records with no URL — a random hash would cause unbounded growth
+        # in source_scores and prevent MongoDB from deduplicating correctly.
+        if not h:
+            continue
+
         llm_s = llm_scores.get(idx, {})
-        relevance = float(llm_s.get("relevance", 0.5))
-        recency = float(llm_s.get("recency", 0.5))
-        authenticity = _authenticity_for(r.get("url", ""), verified_urls)
-        composite = (
+        relevance = _clamp(float(llm_s.get("relevance", 0.5)))
+        recency = _clamp(float(llm_s.get("recency", 0.5)))
+        authenticity = _authenticity_for(url, verified_urls)
+        composite = _clamp(
             _W_RELEVANCE * relevance
             + _W_RECENCY * recency
             + _W_AUTHENTICITY * authenticity
         )
         source_scores.append(
             SourceScore(
-                url_hash=_url_hash(r.get("url", "")),
-                url=r.get("url", ""),
-                domain=_extract_domain(r.get("url", "")),
+                url_hash=h,
+                url=url,
+                domain=_extract_domain(url),
                 tenant_id=tenant_id,
                 section_id=section_id,
                 source_type=r["source_type"],

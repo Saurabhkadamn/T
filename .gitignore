@@ -29,6 +29,11 @@ Thumbs.db
 
 # Environment variables
 .env
+*.env
+
+# Debug artifacts — not source code
+trace.json
+cmtest.py
 
 # ML Models (optional – remove if you want to track)
 *.pt

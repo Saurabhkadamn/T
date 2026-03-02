@@ -36,6 +36,7 @@ Output fields written:  plan_approved (always False — human approves),
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -185,7 +186,15 @@ async def plan_reviewer(state: PlanningState, config: RunnableConfig | None = No
     )
 
     try:
-        response = await llm.ainvoke(messages)
+        response = await asyncio.wait_for(
+            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "plan_reviewer: LLM timed out after %ds — auto-approving plan",
+            settings.llm_timeout_seconds,
+        )
+        response = None
     except Exception as exc:
         logger.warning("plan_reviewer: LLM call failed (%s) — auto-approving plan", exc)
         response = None

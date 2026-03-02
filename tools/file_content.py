@@ -25,24 +25,30 @@ def _redis_key(object_id: str) -> str:
     return f"file:{object_id}:content"
 
 
-async def get_file_content(object_id: str) -> str | None:
+async def get_file_content(
+    object_id: str,
+    redis_client: aioredis.Redis | None = None,
+) -> str | None:
     """Fetch file text content from Redis by object_id.
 
     Args:
         object_id: Platform-wide unique identifier for the uploaded file.
+        redis_client: Optional shared Redis client. If None, creates a temporary
+            connection that is closed automatically after the call.
 
     Returns:
         Extracted text content as a string, or None if not found in cache.
     """
     key = _redis_key(object_id)
-    try:
-        client = aioredis.Redis(
+    owns_client = redis_client is None
+    if owns_client:
+        redis_client = aioredis.Redis(
             host=settings.redis_host,
             password=settings.redis_password or None,
             decode_responses=True,
         )
-        async with client:
-            content = await client.get(key)
+    try:
+        content = await redis_client.get(key)
         if content is None:
             logger.warning("file_content: cache miss — object_id=%s", object_id)
             return None
@@ -53,13 +59,21 @@ async def get_file_content(object_id: str) -> str | None:
             "file_content: Redis error — %s (object_id=%s)", exc, object_id
         )
         return None
+    finally:
+        if owns_client:
+            await redis_client.aclose()
 
 
-async def get_multiple_file_contents(object_ids: list[str]) -> dict[str, str]:
+async def get_multiple_file_contents(
+    object_ids: list[str],
+    redis_client: aioredis.Redis | None = None,
+) -> dict[str, str]:
     """Fetch multiple files from Redis in a single MGET pipeline.
 
     Args:
         object_ids: List of platform-wide object identifiers.
+        redis_client: Optional shared Redis client. If None, creates a temporary
+            connection that is closed automatically after the call.
 
     Returns:
         Dict mapping object_id → content for all cache hits.
@@ -69,17 +83,21 @@ async def get_multiple_file_contents(object_ids: list[str]) -> dict[str, str]:
         return {}
 
     keys = [_redis_key(oid) for oid in object_ids]
-    try:
-        client = aioredis.Redis(
+    owns_client = redis_client is None
+    if owns_client:
+        redis_client = aioredis.Redis(
             host=settings.redis_host,
             password=settings.redis_password or None,
             decode_responses=True,
         )
-        async with client:
-            values = await client.mget(*keys)
+    try:
+        values = await redis_client.mget(*keys)
     except Exception as exc:
         logger.error("file_content: Redis MGET error — %s", exc)
         return {}
+    finally:
+        if owns_client:
+            await redis_client.aclose()
 
     result: dict[str, str] = {}
     for oid, val in zip(object_ids, values):

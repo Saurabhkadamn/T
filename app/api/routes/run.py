@@ -37,8 +37,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_DB_NAME = "kadal_platform"
-
 _RATE_LIMIT_SCRIPT = """
 local key = KEYS[1]
 local limit = tonumber(ARGV[1])
@@ -95,11 +93,11 @@ async def run(
     # ── Rate limiting ──────────────────────────────────────────────────────
     await _check_rate_limit(redis, tenant_id, body.user_id)
 
-    db = mongo[_DB_NAME]
+    db = mongo[settings.mongo_db_name]
 
     # ── Load plan from deep_research_jobs ─────────────────────────────────
     try:
-        job_doc = await db["deep_research_jobs"].find_one(
+        job_doc = await db["Deep_Research_Jobs"].find_one(
             {"job_id": body.job_id, "tenant_id": tenant_id}
         )
     except Exception as exc:
@@ -130,7 +128,7 @@ async def run(
 
     # ── Update deep_research_jobs ──────────────────────────────────────────
     try:
-        await db["deep_research_jobs"].update_one(
+        await db["Deep_Research_Jobs"].update_one(
             {"job_id": body.job_id, "tenant_id": tenant_id},
             {"$set": {
                 "status": "research_queued",
@@ -169,11 +167,11 @@ async def run(
         "created_at": now_iso,
     }
     try:
-        await db["deep_research_reports"].insert_one(report_doc)
+        await db["Deep_Research_Reports"].insert_one(report_doc)
     except Exception as exc:
         logger.exception("run: failed to insert deep_research_reports")
         # Best-effort rollback of job status update
-        await db["deep_research_jobs"].update_one(
+        await db["Deep_Research_Jobs"].update_one(
             {"job_id": body.job_id, "tenant_id": tenant_id},
             {"$set": {"status": "plans_ready", "report_id": None, "updated_at": now_iso}},
         )
@@ -182,16 +180,20 @@ async def run(
             detail=f"Failed to create report record: {exc}",
         ) from exc
 
-    # ── Insert background_jobs ─────────────────────────────────────────────
+    # ── Insert Background_Jobs ─────────────────────────────────────────────
     bg_doc = {
-        "type": "DEEP_RESEARCH",
-        "ref_id": body.job_id,
+        "job_id": body.job_id,
+        "job_type": "DEEP_RESEARCH",
         "tenant_id": tenant_id,
-        "status": "queued",
-        "created_at": now_iso,
+        "source_path": "",
+        "call_back_url": None,
+        "job_submitted_date": now_iso,
+        "job_status": "QUEUED",
+        "error": None,
+        "job_completed_date": None,
     }
     try:
-        await db["background_jobs"].insert_one(bg_doc)
+        await db["Background_Jobs"].insert_one(bg_doc)
     except Exception as exc:
         # Non-fatal — job/report documents exist; the platform scheduler can
         # still pick up the job from deep_research_jobs directly.

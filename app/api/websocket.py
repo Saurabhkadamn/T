@@ -30,14 +30,14 @@ import json
 import logging
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
-from motor.motor_asyncio import AsyncIOMotorClient
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 _TERMINAL_EVENTS = {"completed", "error"}
-_DB_NAME = "kadal_platform"
 
 
 @router.websocket("/ws/deep-research/{job_id}")
@@ -47,6 +47,15 @@ async def deep_research_ws(
     tenant_id: str = Query(..., description="Tenant ID for authorization"),
 ) -> None:
     """Stream deep research job events to a WebSocket client."""
+    # ── Origin validation (before accept) ─────────────────────────────────
+    allowed = settings.cors_origins
+    if "*" not in allowed:
+        origin = websocket.headers.get("origin", "")
+        if origin not in allowed:
+            logger.warning("ws: rejected connection from disallowed origin %r", origin)
+            await websocket.close(code=4403)
+            return
+
     await websocket.accept()
     logger.info("ws: client connected job_id=%s tenant_id=%s", job_id, tenant_id)
 
@@ -61,8 +70,8 @@ async def deep_research_ws(
     )
     if stored_tenant is None:
         # Redis cache miss — fall back to MongoDB
-        mongo: AsyncIOMotorClient = websocket.app.state.mongo
-        doc = await mongo[_DB_NAME]["deep_research_jobs"].find_one(
+        mongo = websocket.app.state.mongo
+        doc = await mongo[settings.mongo_db_name]["Deep_Research_Jobs"].find_one(
             {"job_id": job_id}, {"tenant_id": 1}
         )
         stored_tenant = doc["tenant_id"] if doc else None

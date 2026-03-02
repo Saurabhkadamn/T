@@ -31,6 +31,7 @@ Output fields written:  clarification_questions, clarification_count, status
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -38,6 +39,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from app.config import settings
 from app.llm_factory import get_llm
 from graphs.planning.state import PlanningState
 
@@ -111,7 +113,7 @@ def _parse_questions(raw: str) -> list[str]:
     questions = json.loads(text)
     if not isinstance(questions, list):
         raise ValueError("Expected a JSON array of strings")
-    return [str(q).strip() for q in questions if str(q).strip()][:3]
+    return [str(q).strip() for q in questions if str(q).strip()][:settings.loops.clarification_max]
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +157,12 @@ async def clarifier(state: PlanningState, config: RunnableConfig | None = None) 
     )
 
     try:
-        response = await llm.ainvoke(messages)
+        response = await asyncio.wait_for(
+            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+        )
+    except asyncio.TimeoutError:
+        logger.error("clarifier: LLM timed out after %ds", settings.llm_timeout_seconds)
+        return {"status": "failed", "error": "clarifier: LLM call timed out"}
     except Exception as exc:
         logger.error("clarifier: LLM call failed — %s", exc)
         return {"status": "failed", "error": f"clarifier: LLM call failed — {exc}"}

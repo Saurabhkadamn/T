@@ -30,12 +30,14 @@ Output fields written:  fused_knowledge, status="fusing"
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from app.config import settings
 from app.llm_factory import get_llm
 from graphs.execution.state import (
     Citation,
@@ -235,8 +237,19 @@ async def knowledge_fusion(
     ]
 
     try:
-        response = await llm.ainvoke(messages)
+        response = await asyncio.wait_for(
+            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+        )
         fused_knowledge: str = response.content.strip()
+    except asyncio.TimeoutError:
+        logger.error(
+            "knowledge_fusion: LLM timed out after %ds (job_id=%s)",
+            settings.llm_timeout_seconds, job_id,
+        )
+        fused_knowledge = "\n\n".join(
+            f"## {f['section_title']}\n{f['compressed_text']}"
+            for f in compressed_findings
+        )
     except Exception as exc:
         logger.error(
             "knowledge_fusion: LLM call failed — %s (job_id=%s)", exc, job_id

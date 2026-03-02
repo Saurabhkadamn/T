@@ -29,7 +29,6 @@ Output fields written:  verified_urls
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from typing import Any
 from urllib.parse import urlparse
@@ -38,6 +37,7 @@ import httpx
 
 from langchain_core.runnables import RunnableConfig
 
+from graphs.execution._url_utils import url_hash as _url_hash_fn
 from graphs.execution.state import RawSearchResult, SectionResearchState, VerifiedUrl
 
 logger = logging.getLogger(__name__)
@@ -50,16 +50,6 @@ _INAUTHENTIC_STATUS = {400, 401, 403, 404, 410, 451}
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _normalise_url(url: str) -> str:
-    """Lowercase and strip trailing slash; keep the rest unchanged."""
-    return url.lower().rstrip("/")
-
-
-def _url_hash(url: str) -> str:
-    """SHA-256 of the normalised URL, hex-encoded (64 chars)."""
-    return hashlib.sha256(_normalise_url(url).encode()).hexdigest()
-
 
 def _extract_domain(url: str) -> str:
     """Extract registered domain from a URL, stripping 'www.' prefix.
@@ -82,7 +72,7 @@ def _extract_domain(url: str) -> str:
 
 async def _check_url(url: str) -> VerifiedUrl:
     """Issue a HEAD request and build a VerifiedUrl record."""
-    h = _url_hash(url)
+    h = _url_hash_fn(url)
     domain = _extract_domain(url)
 
     try:

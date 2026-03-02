@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -19,8 +19,9 @@ from pydantic import BaseModel, Field
 class UploadedFileModel(BaseModel):
     """File metadata mirroring graphs/planning/state.py UploadedFile TypedDict."""
     object_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
-    filename: str
-    mime_type: str
+    filename: str = Field(..., min_length=1, max_length=255)
+    mime_type: str = Field(..., min_length=3, max_length=100,
+                           pattern=r"^[\w\-\.]+/[\w\-\.\+]+$")
 
 
 class ChatMessageModel(BaseModel):
@@ -42,6 +43,15 @@ class ToolsEnabledModel(BaseModel):
 class PlanRequest(BaseModel):
     """Request body for the planning endpoint."""
     topic: str = Field(..., min_length=1, max_length=5000, description="Research topic / question")
+
+    @field_validator("topic", mode="before")
+    @classmethod
+    def strip_topic(cls, v: str) -> str:
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                raise ValueError("topic cannot be blank or whitespace-only")
+        return v
     tenant_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
     user_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
     chat_bot_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
@@ -68,7 +78,7 @@ class PlanResponse(BaseModel):
     - False → present plan to user for approval, then call /run
     """
     job_id: str
-    status: str                                         # "plans_ready" | "clarification_needed"
+    status: str                                         # free-form — graph-defined status strings
     needs_clarification: bool
     clarification_questions: list[str] = Field(default_factory=list)
     refined_topic: Optional[str] = None
@@ -97,7 +107,7 @@ class RunRequest(BaseModel):
 class RunResponse(BaseModel):
     job_id: str
     report_id: str
-    status: str = "research_queued"
+    status: Literal["research_queued"] = "research_queued"
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +116,12 @@ class RunResponse(BaseModel):
 
 class StatusResponse(BaseModel):
     job_id: str
-    status: str
+    status: Literal[
+        "plans_ready", "research_queued", "research", "completed",
+        "failed", "partial_success", "unknown",
+        # graph-internal statuses that may be surfaced
+        "initializing", "researching", "fusing", "writing", "reviewing", "exporting",
+    ]
     progress: int = 0
     section: Optional[str] = None      # current section being researched
     started_at: Optional[str] = None
@@ -117,6 +132,9 @@ class StatusResponse(BaseModel):
 # GET /api/deepresearch/reports[/{report_id}]
 # ---------------------------------------------------------------------------
 
+_ReportStatus = Literal["research_queued", "research", "completed", "failed", "partial_success", "unknown"]
+
+
 class ReportListItem(BaseModel):
     report_id: str
     job_id: str
@@ -124,7 +142,7 @@ class ReportListItem(BaseModel):
     user_id: str
     topic: str
     title: str
-    status: str
+    status: _ReportStatus
     depth_of_research: str
     section_count: int = 0
     citation_count: int = 0
@@ -148,7 +166,7 @@ class ReportDetailResponse(BaseModel):
     user_id: str
     topic: str
     title: str
-    status: str
+    status: _ReportStatus
     depth_of_research: str
     section_count: int = 0
     citation_count: int = 0

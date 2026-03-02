@@ -45,6 +45,7 @@ Output fields written:  search_queries (replaces previous list — no reducer)
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -53,6 +54,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from app.config import settings
 from app.llm_factory import get_llm
 from graphs.execution.state import RawSearchResult, SectionResearchState
 
@@ -228,8 +230,16 @@ async def search_query_gen(
     )
 
     try:
-        response = await llm.ainvoke(messages)
+        response = await asyncio.wait_for(
+            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+        )
         queries = _parse_response(response.content)
+    except asyncio.TimeoutError:
+        logger.error(
+            "search_query_gen: LLM timed out after %ds (section_id=%s)",
+            settings.llm_timeout_seconds, section_id,
+        )
+        queries = [section_title] if section_title else []
     except Exception as exc:
         logger.error(
             "search_query_gen: failed to generate queries — %s (section_id=%s)",

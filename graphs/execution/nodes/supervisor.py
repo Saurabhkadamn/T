@@ -54,6 +54,7 @@ Graph wiring (graph.py):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -336,8 +337,16 @@ async def supervisor(state: ExecutionState, config: RunnableConfig | None = None
     ]
 
     try:
-        response = await llm.ainvoke(messages)
+        response = await asyncio.wait_for(
+            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+        )
         knowledge_gaps = _parse_reflection(response.content)
+    except asyncio.TimeoutError:
+        logger.error(
+            "supervisor: reflection LLM timed out after %ds (job_id=%s)",
+            settings.llm_timeout_seconds, job_id,
+        )
+        knowledge_gaps = []
     except Exception as exc:
         # Non-fatal: log and continue without gaps so the pipeline completes.
         logger.error(

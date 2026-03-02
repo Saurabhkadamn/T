@@ -15,18 +15,19 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Path, status
 from motor.motor_asyncio import AsyncIOMotorClient
 from redis.asyncio import Redis
 
 from app.api.models import StatusResponse
+from app.config import settings
 from app.dependencies import get_mongo, get_redis, get_tenant_id
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_DB_NAME = "kadal_platform"
+_UUID4_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 
 
 @router.get(
@@ -35,7 +36,7 @@ _DB_NAME = "kadal_platform"
     summary="Get job status and progress",
 )
 async def get_status(
-    job_id: str,
+    job_id: str = Path(..., min_length=36, max_length=36, pattern=_UUID4_PATTERN),
     tenant_id: str = Depends(get_tenant_id),
     redis: Redis = Depends(get_redis),
     mongo: AsyncIOMotorClient = Depends(get_mongo),
@@ -61,9 +62,9 @@ async def get_status(
         )
 
     # ── MongoDB fallback ───────────────────────────────────────────────────
-    db = mongo[_DB_NAME]
+    db = mongo[settings.mongo_db_name]
     try:
-        doc = await db["deep_research_jobs"].find_one(
+        doc = await db["Deep_Research_Jobs"].find_one(
             {"job_id": job_id, "tenant_id": tenant_id},
             projection={"status": 1, "progress": 1, "started_at": 1, "updated_at": 1, "_id": 0},
         )

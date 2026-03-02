@@ -59,7 +59,6 @@ from graphs.execution.state import Citation, ExecutionState, SourceScore
 logger = logging.getLogger(__name__)
 
 _S3_KEY_TEMPLATE = "deep-research/{tenant_id}/{user_id}/{report_id}.html"
-_PRESIGNED_URL_TTL = 3600   # 1 hour
 _SCORES_HISTORY_CAP = 20    # max entries in source_scores.scores_history
 
 
@@ -89,6 +88,7 @@ def _get_s3_client():
     if _s3_client is None:
         _s3_client = boto3.client(
             "s3",
+            region_name=settings.s3_region,
             config=BotocoreConfig(
                 connect_timeout=10,
                 read_timeout=30,
@@ -105,6 +105,18 @@ def _get_mongo_client() -> AsyncIOMotorClient:
             settings.mongo_uri, serverSelectionTimeoutMS=5_000
         )
     return _mongo_client
+
+
+async def close_exporter_clients() -> None:
+    """Close module-level singleton clients.
+
+    Call this from worker/executor.py's finally block to ensure Motor's
+    background threads don't hang the process on EKS Job exit.
+    """
+    global _mongo_client
+    if _mongo_client is not None:
+        _mongo_client.close()
+        _mongo_client = None
 
 
 async def _upload_to_s3(
@@ -124,7 +136,7 @@ async def _upload_to_s3(
         presigned = client.generate_presigned_url(
             "get_object",
             Params={"Bucket": settings.s3_bucket, "Key": key},
-            ExpiresIn=_PRESIGNED_URL_TTL,
+            ExpiresIn=settings.s3_presigned_url_ttl_seconds,
         )
         return presigned
 
@@ -144,13 +156,13 @@ async def _upsert_report(
     now_iso: str,
 ) -> None:
     """Upsert deep_research_reports document.  Always includes tenant_id."""
-    db = mongo_client["kadal_platform"]
-    coll = db["deep_research_reports"]
+    db = mongo_client[settings.mongo_db_name]
+    coll = db["Deep_Research_Reports"]
 
     # Fetch llm_model from deep_research_jobs (not stored in ExecutionState)
     llm_model: str = ""
     try:
-        job_doc = await db["deep_research_jobs"].find_one(
+        job_doc = await db["Deep_Research_Jobs"].find_one(
             {"job_id": state["job_id"], "tenant_id": state["tenant_id"]},
             projection={"llm_model": 1, "_id": 0},
         )
@@ -212,8 +224,8 @@ async def _bulk_upsert_source_scores(
     """
     if not scores:
         return
-    db = mongo_client["kadal_platform"]
-    coll = db["source_scores"]
+    db = mongo_client[settings.mongo_db_name]
+    coll = db["Source_Scores"]
 
     from pymongo import UpdateOne
     ops = [
@@ -261,8 +273,8 @@ async def _update_job_status(
     now_iso: str,
 ) -> None:
     """Update deep_research_jobs.  Always includes tenant_id in filter."""
-    db = mongo_client["kadal_platform"]
-    coll = db["deep_research_jobs"]
+    db = mongo_client[settings.mongo_db_name]
+    coll = db["Deep_Research_Jobs"]
     await coll.update_one(
         {"job_id": job_id, "tenant_id": tenant_id},
         {

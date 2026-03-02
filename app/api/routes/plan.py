@@ -41,8 +41,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_DB_NAME = "kadal_platform"
-
 _RATE_LIMIT_SCRIPT = """
 local key = KEYS[1]
 local limit = tonumber(ARGV[1])
@@ -279,8 +277,8 @@ async def plan(
             "updated_at": now_iso,
         }
         try:
-            db = mongo[_DB_NAME]
-            await db["deep_research_jobs"].replace_one(
+            db = mongo[settings.mongo_db_name]
+            await db["Deep_Research_Jobs"].replace_one(
                 {"job_id": job_id, "tenant_id": tenant_id},
                 job_doc,
                 upsert=True,

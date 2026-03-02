@@ -132,8 +132,8 @@ async def build_execution_graph() -> tuple[Any, MongoDBSaver]:
     mongo_client = AsyncIOMotorClient(settings.mongo_uri)
     checkpointer = MongoDBSaver(
         client=mongo_client,
-        db_name="kadal_platform",
-        collection_name="langgraph_checkpoints",
+        db_name=settings.mongo_db_name,
+        collection_name="Langgraph_Checkpoints",
     )
 
     compiled = _build_graph().compile(checkpointer=checkpointer)

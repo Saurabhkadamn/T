@@ -26,6 +26,7 @@ Output fields written:  plan, status
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -245,7 +246,12 @@ async def plan_creator(state: PlanningState, config: RunnableConfig | None = Non
     )
 
     try:
-        response = await llm.ainvoke(messages)
+        response = await asyncio.wait_for(
+            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+        )
+    except asyncio.TimeoutError:
+        logger.error("plan_creator: LLM timed out after %ds", settings.llm_timeout_seconds)
+        return {"status": "failed", "error": "plan_creator: LLM call timed out"}
     except Exception as exc:
         logger.error("plan_creator: LLM call failed — %s", exc)
         return {"status": "failed", "error": f"plan_creator: LLM call failed — {exc}"}

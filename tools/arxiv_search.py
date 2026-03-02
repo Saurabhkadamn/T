@@ -91,7 +91,14 @@ async def arxiv_search(
     client = arxiv.Client()
 
     loop = asyncio.get_running_loop()
-    papers = await loop.run_in_executor(None, lambda: list(client.results(search)))
+    try:
+        papers = await loop.run_in_executor(None, lambda: list(client.results(search)))
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).error(
+            "arxiv_search: API call failed — %s (query=%r)", exc, query
+        )
+        return []
 
     results: List[RawSearchResult] = []
 

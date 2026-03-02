@@ -47,16 +47,14 @@ from pymongo import ASCENDING, DESCENDING, IndexModel
 
 logger = logging.getLogger(__name__)
 
-_DB_NAME = "kadal_platform"
-
 
 # ---------------------------------------------------------------------------
 # Index specifications
 # ---------------------------------------------------------------------------
 
 _BACKGROUND_JOBS_INDEXES = [
-    IndexModel([("type", ASCENDING), ("status", ASCENDING)], name="type_status"),
-    IndexModel([("ref_id", ASCENDING)], name="ref_id"),
+    IndexModel([("job_type", ASCENDING), ("job_status", ASCENDING)], name="job_type_job_status"),
+    IndexModel([("job_id", ASCENDING)], name="job_id"),
 ]
 
 _DEEP_RESEARCH_JOBS_INDEXES = [
@@ -107,25 +105,25 @@ async def setup_all_indexes(mongo_uri: str | None = None) -> None:
 
     uri = mongo_uri or settings.mongo_uri
     client = AsyncIOMotorClient(uri)
-    db = client[_DB_NAME]
+    db = client[settings.mongo_db_name]
 
     tasks = [
-        _apply_indexes(db, "background_jobs", _BACKGROUND_JOBS_INDEXES),
-        _apply_indexes(db, "deep_research_jobs", _DEEP_RESEARCH_JOBS_INDEXES),
-        _apply_indexes(db, "deep_research_reports", _DEEP_RESEARCH_REPORTS_INDEXES),
-        _apply_indexes(db, "source_scores", _SOURCE_SCORES_INDEXES),
-        # langgraph_checkpoints: AsyncMongoDBSaver manages its own indexes.
-        _ensure_collection_exists(db, "langgraph_checkpoints"),
+        _apply_indexes(db, "Background_Jobs", _BACKGROUND_JOBS_INDEXES),
+        _apply_indexes(db, "Deep_Research_Jobs", _DEEP_RESEARCH_JOBS_INDEXES),
+        _apply_indexes(db, "Deep_Research_Reports", _DEEP_RESEARCH_REPORTS_INDEXES),
+        _apply_indexes(db, "Source_Scores", _SOURCE_SCORES_INDEXES),
+        # Langgraph_Checkpoints: AsyncMongoDBSaver manages its own indexes.
+        _ensure_collection_exists(db, "Langgraph_Checkpoints"),
     ]
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for name, result in zip(
         [
-            "background_jobs",
-            "deep_research_jobs",
-            "deep_research_reports",
-            "source_scores",
-            "langgraph_checkpoints",
+            "Background_Jobs",
+            "Deep_Research_Jobs",
+            "Deep_Research_Reports",
+            "Source_Scores",
+            "Langgraph_Checkpoints",
         ],
         results,
     ):

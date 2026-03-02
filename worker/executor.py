@@ -33,13 +33,12 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from app.config import settings
 from graphs.execution.graph import build_execution_graph
+from graphs.execution.nodes.exporter import close_exporter_clients
 from graphs.execution.state import ExecutionState, ToolsEnabled
 from tools.file_content import get_multiple_file_contents
 from worker.streaming import JobStreamer
 
 logger = logging.getLogger(__name__)
-
-_DB_NAME = "kadal_platform"
 
 
 def _now_iso() -> str:
@@ -68,9 +67,9 @@ async def run(job_id: str) -> None:
             password=settings.redis_password or None,
             decode_responses=True,
         )
-        db = mongo_client[_DB_NAME]
+        db = mongo_client[settings.mongo_db_name]
 
-        job_doc = await db["deep_research_jobs"].find_one({"job_id": job_id})
+        job_doc = await db["Deep_Research_Jobs"].find_one({"job_id": job_id})
         if job_doc is None:
             raise ValueError(f"Job {job_id!r} not found in deep_research_jobs")
 
@@ -132,7 +131,7 @@ async def run(job_id: str) -> None:
 
         # Mark job as running in MongoDB
         started_at = _now_iso()
-        await db["deep_research_jobs"].update_one(
+        await db["Deep_Research_Jobs"].update_one(
             {"job_id": job_id, "tenant_id": tenant_id},
             {"$set": {
                 "status": "research",
@@ -207,12 +206,12 @@ async def run(job_id: str) -> None:
         presigned_url = ""
         if s3_key:
             import boto3
-            s3 = boto3.client("s3")
+            s3 = boto3.client("s3", region_name=settings.s3_region)
             try:
                 presigned_url = s3.generate_presigned_url(
                     "get_object",
                     Params={"Bucket": settings.s3_bucket, "Key": s3_key},
-                    ExpiresIn=3600,
+                    ExpiresIn=settings.s3_presigned_url_ttl_seconds,
                 )
             except Exception as exc:
                 logger.error("executor: presigned URL failed — %s", exc)
@@ -220,7 +219,7 @@ async def run(job_id: str) -> None:
         await streamer.publish_completed(report_id, presigned_url)
 
         # Update MongoDB job status to completed
-        await db["deep_research_jobs"].update_one(
+        await db["Deep_Research_Jobs"].update_one(
             {"job_id": job_id, "tenant_id": tenant_id},
             {"$set": {"status": "completed", "progress": 100, "updated_at": _now_iso()}},
         )
@@ -232,11 +231,11 @@ async def run(job_id: str) -> None:
         # Best-effort: mark job as failed in MongoDB
         if mongo_client is not None:
             try:
-                db = mongo_client[_DB_NAME]
+                db = mongo_client[settings.mongo_db_name]
                 update_filter: dict = {"job_id": job_id}
                 if tenant_id:
                     update_filter["tenant_id"] = tenant_id
-                await db["deep_research_jobs"].update_one(
+                await db["Deep_Research_Jobs"].update_one(
                     update_filter,
                     {
                         "$set": {
@@ -262,5 +261,10 @@ async def run(job_id: str) -> None:
                 pass
         if mongo_client is not None:
             mongo_client.close()
+        # Close the exporter's module-level singleton clients
+        try:
+            await close_exporter_clients()
+        except Exception:
+            pass
         await streamer.aclose()
         logger.info("executor: finished job_id=%s", job_id)

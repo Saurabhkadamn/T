@@ -44,6 +44,7 @@ Output fields written:  compressed_text, citations
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -51,6 +52,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from app.config import settings
 from app.llm_factory import get_llm
 from graphs.execution.state import (
     Citation,
@@ -238,8 +240,19 @@ async def compressor(
     ]
 
     try:
-        response = await llm.ainvoke(messages)
+        response = await asyncio.wait_for(
+            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+        )
         compressed_text: str = response.content.strip()
+    except asyncio.TimeoutError:
+        logger.error(
+            "compressor: LLM timed out after %ds (section_id=%s)",
+            settings.llm_timeout_seconds, section_id,
+        )
+        compressed_text = "\n\n".join(
+            f"[S{i+1}] {r['title']}: {r['content'][:500]}"
+            for i, r in enumerate(usable[:5])
+        )
     except Exception as exc:
         logger.error(
             "compressor: LLM call failed — %s (section_id=%s)", exc, section_id

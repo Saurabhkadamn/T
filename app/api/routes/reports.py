@@ -14,11 +14,12 @@ Security rules
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from app.api.models import ReportDetailResponse, ReportListItem, ReportListResponse
@@ -29,21 +30,27 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_DB_NAME = "kadal_platform"
-_PRESIGNED_TTL_SECONDS = 3600  # 1 hour
+_UUID4_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+_S3_KEY_RE = re.compile(
+    r"^deep-research/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+/[0-9a-f-]{36}\.html$"
+)
 
 
 def _generate_presigned_url(s3_key: str) -> str | None:
-    """Generate a fresh S3 presigned GET URL with 1 hr TTL.
+    """Generate a fresh S3 presigned GET URL with TTL from settings.
 
     Returns None on any AWS error so the caller can still serve metadata.
     """
+    # Validate s3_key format before passing to AWS
+    if not _S3_KEY_RE.match(s3_key):
+        logger.error("reports: suspicious s3_key rejected — %r", s3_key)
+        return None
     try:
-        s3 = boto3.client("s3")
+        s3 = boto3.client("s3", region_name=settings.s3_region)
         url = s3.generate_presigned_url(
             "get_object",
             Params={"Bucket": settings.s3_bucket, "Key": s3_key},
-            ExpiresIn=_PRESIGNED_TTL_SECONDS,
+            ExpiresIn=settings.s3_presigned_url_ttl_seconds,
         )
         return url
     except (BotoCoreError, ClientError) as exc:
@@ -63,13 +70,13 @@ async def list_reports(
     tenant_id: str = Depends(get_tenant_id),
     mongo: AsyncIOMotorClient = Depends(get_mongo),
 ) -> ReportListResponse:
-    db = mongo[_DB_NAME]
+    db = mongo[settings.mongo_db_name]
     query_filter = {"tenant_id": tenant_id, "user_id": user_id}
 
     try:
-        total = await db["deep_research_reports"].count_documents(query_filter)
+        total = await db["Deep_Research_Reports"].count_documents(query_filter)
         cursor = (
-            db["deep_research_reports"]
+            db["Deep_Research_Reports"]
             .find(
                 query_filter,
                 projection={
@@ -117,14 +124,14 @@ async def list_reports(
     summary="Get a single report with a fresh S3 presigned URL",
 )
 async def get_report(
-    report_id: str,
+    report_id: str = Path(..., min_length=36, max_length=36, pattern=_UUID4_PATTERN),
     tenant_id: str = Depends(get_tenant_id),
     mongo: AsyncIOMotorClient = Depends(get_mongo),
 ) -> ReportDetailResponse:
-    db = mongo[_DB_NAME]
+    db = mongo[settings.mongo_db_name]
 
     try:
-        doc = await db["deep_research_reports"].find_one(
+        doc = await db["Deep_Research_Reports"].find_one(
             {"report_id": report_id, "tenant_id": tenant_id},
             projection={"_id": 0},
         )
@@ -148,7 +155,9 @@ async def get_report(
     if s3_key:
         html_url = _generate_presigned_url(s3_key)
         if html_url:
-            expires_dt = datetime.now(timezone.utc) + timedelta(seconds=_PRESIGNED_TTL_SECONDS)
+            expires_dt = datetime.now(timezone.utc) + timedelta(
+                seconds=settings.s3_presigned_url_ttl_seconds
+            )
             html_url_expires_at = expires_dt.isoformat()
 
     return ReportDetailResponse(

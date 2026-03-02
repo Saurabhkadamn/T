@@ -61,17 +61,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Non-fatal at startup — indexes may already exist from a previous run.
 
     logger.info("startup: initialising Redis connection pool …")
-    app.state.redis = aioredis.Redis(
+    _redis_pool = aioredis.ConnectionPool(
         host=settings.redis_host,
         password=settings.redis_password or None,
+        max_connections=settings.redis_max_connections,
         decode_responses=True,
-        auto_close_connection_pool=True,
     )
-    logger.info("startup: Redis pool ready")
+    app.state.redis = aioredis.Redis(connection_pool=_redis_pool)
+    logger.info("startup: Redis pool ready (max_connections=%d)", settings.redis_max_connections)
 
     logger.info("startup: initialising MongoDB client …")
-    app.state.mongo = AsyncIOMotorClient(settings.mongo_uri)
-    logger.info("startup: MongoDB client ready")
+    app.state.mongo = AsyncIOMotorClient(
+        settings.mongo_uri,
+        maxPoolSize=settings.mongo_max_pool_size,
+        minPoolSize=5,
+        serverSelectionTimeoutMS=5_000,
+        connectTimeoutMS=10_000,
+    )
+    logger.info("startup: MongoDB client ready (maxPoolSize=%d)", settings.mongo_max_pool_size)
 
     yield
 

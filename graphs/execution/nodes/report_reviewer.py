@@ -29,6 +29,7 @@ Output fields written:  review_feedback (str or None), revision_count (+1),
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -160,8 +161,16 @@ async def report_reviewer(
     ]
 
     try:
-        response = await llm.ainvoke(messages)
+        response = await asyncio.wait_for(
+            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+        )
         verdict, feedback = _parse_verdict(response.content)
+    except asyncio.TimeoutError:
+        logger.error(
+            "report_reviewer: LLM timed out after %ds (job_id=%s)",
+            settings.llm_timeout_seconds, job_id,
+        )
+        verdict, feedback = "approved", None
     except Exception as exc:
         logger.error(
             "report_reviewer: LLM call failed — %s (job_id=%s)", exc, job_id
@@ -201,7 +210,9 @@ def should_revise(state: ExecutionState) -> str:
     revision_count: int = state.get("revision_count", 0)
     max_revisions: int = settings.loops.report_revision_max
 
-    if review_feedback and revision_count <= max_revisions:
+    # Use strict less-than: revision_count is already incremented by the node,
+    # so <= max_revisions would allow one extra revision beyond the configured cap.
+    if review_feedback and revision_count < max_revisions:
         logger.info(
             "should_revise: sending back for revision (revision=%d/%d)",
             revision_count,

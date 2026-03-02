@@ -37,12 +37,14 @@ Output fields written:  report_html, status="reviewing"
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from app.config import settings
 from app.llm_factory import get_llm
 from graphs.execution.state import Citation, ExecutionState
 
@@ -228,15 +230,29 @@ async def report_writer(
     ]
 
     try:
-        response = await llm.ainvoke(messages)
+        response = await asyncio.wait_for(
+            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+        )
         report_html: str = response.content.strip()
+    except asyncio.TimeoutError:
+        logger.error(
+            "report_writer: LLM timed out after %ds (job_id=%s)",
+            settings.llm_timeout_seconds, job_id,
+        )
+        return {
+            "report_html": state.get("report_html"),
+            "status": "partial_success",
+            "error": f"report_writer: LLM timed out after {settings.llm_timeout_seconds}s",
+        }
     except Exception as exc:
         logger.error(
             "report_writer: LLM call failed — %s (job_id=%s)", exc, job_id
         )
+        # Return partial_success so the graph routes to exporter and persists
+        # whatever HTML already exists, rather than terminating with status=failed.
         return {
-            "report_html": None,
-            "status": "failed",
+            "report_html": state.get("report_html"),   # preserve any existing HTML
+            "status": "partial_success",
             "error": f"report_writer: LLM error — {exc}",
         }
 

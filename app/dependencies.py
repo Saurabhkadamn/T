@@ -20,9 +20,13 @@ Usage in a route::
 
 from __future__ import annotations
 
+import re
+
 from fastapi import Depends, Header, HTTPException, Request, status
 from motor.motor_asyncio import AsyncIOMotorClient
 from redis.asyncio import Redis
+
+_TENANT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 
 
 # ---------------------------------------------------------------------------
@@ -54,14 +58,13 @@ async def get_tenant_id(
 ) -> str:
     """Extract and validate the tenant_id from the X-Tenant-ID request header.
 
-    Raises HTTP 400 if the header is missing or empty.
-    FastAPI's Header(...) already enforces presence; this guard handles
-    whitespace-only values.
+    Raises HTTP 400 if the header is missing, empty, or contains invalid characters.
+    Accepts only alphanumeric characters, underscores, and hyphens (max 128 chars).
     """
     tenant_id = x_tenant_id.strip()
-    if not tenant_id:
+    if not _TENANT_ID_RE.match(tenant_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="X-Tenant-ID header must not be empty",
+            detail="Invalid X-Tenant-ID format (alphanumeric, _ and - only, max 128 chars)",
         )
     return tenant_id

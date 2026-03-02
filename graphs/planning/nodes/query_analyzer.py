@@ -29,6 +29,7 @@ Output fields written:  refined_topic, needs_clarification, depth_of_research,
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -184,7 +185,14 @@ async def query_analyzer(state: PlanningState, config: RunnableConfig | None = N
     )
 
     try:
-        response = await llm.ainvoke(messages)
+        response = await asyncio.wait_for(
+            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "query_analyzer: LLM timed out after %ds", settings.llm_timeout_seconds
+        )
+        return {"status": "failed", "error": "query_analyzer: LLM call timed out"}
     except Exception as exc:
         logger.error("query_analyzer: LLM call failed — %s", exc)
         return {"status": "failed", "error": f"query_analyzer: LLM call failed — {exc}"}

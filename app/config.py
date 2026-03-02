@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -231,6 +231,28 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["*"]   # override via CORS_ORIGINS='["https://app.example.com"]'
 
     # ------------------------------------------------------------------
+    # MongoDB database name
+    # ------------------------------------------------------------------
+    mongo_db_name: str = "Dev_Kadal"    # override: MONGO_DB_NAME=Prod_Kadal
+
+    # ------------------------------------------------------------------
+    # S3 settings
+    # ------------------------------------------------------------------
+    s3_region: str = "ap-south-1"                      # override: S3_REGION=us-east-1
+    s3_presigned_url_ttl_seconds: int = 3600            # 1 hour
+
+    # ------------------------------------------------------------------
+    # LLM call timeout
+    # ------------------------------------------------------------------
+    llm_timeout_seconds: int = 120                      # override: LLM_TIMEOUT_SECONDS=180
+
+    # ------------------------------------------------------------------
+    # Connection pool sizes
+    # ------------------------------------------------------------------
+    mongo_max_pool_size: int = 50
+    redis_max_connections: int = 100
+
+    # ------------------------------------------------------------------
     # Planning graph timeout
     # ------------------------------------------------------------------
     planning_timeout_seconds: int = 180
@@ -241,6 +263,20 @@ class Settings(BaseSettings):
     rate_limit_plan_per_hour: int | None = None
     rate_limit_run_per_hour: int | None = None
     max_concurrent_jobs_per_tenant: int | None = None
+
+    # ------------------------------------------------------------------
+    # Startup validation
+    # ------------------------------------------------------------------
+    @model_validator(mode="after")
+    def validate_llm_keys(self) -> "Settings":
+        """Fail fast at startup if the active LLM provider has no API key."""
+        if self.llm_provider == "openai" and not self.openai_api_key:
+            raise ValueError("OPENAI_API_KEY must be set when LLM_PROVIDER=openai")
+        if self.llm_provider == "anthropic" and not self.anthropic_api_key:
+            raise ValueError("ANTHROPIC_API_KEY must be set when LLM_PROVIDER=anthropic")
+        if self.llm_provider == "google" and not self.gemini_api_key:
+            raise ValueError("GEMINI_API_KEY must be set when LLM_PROVIDER=google")
+        return self
 
     # ------------------------------------------------------------------
     # Helpers

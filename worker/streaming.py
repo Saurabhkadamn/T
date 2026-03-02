@@ -36,8 +36,6 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_DB_NAME = "kadal_platform"
-
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
