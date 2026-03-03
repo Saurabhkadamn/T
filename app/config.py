@@ -47,6 +47,7 @@ class LoopLimits(BaseModel):
 
     clarification_max: int = 3
     plan_refinement_max: int = 3
+    plan_revision_max: int = 3          # max user plan rejections before forcing restart
     plan_self_review_max: int = 2
     supervisor_reflection_max: int = 2
     report_revision_max: int = 1
@@ -83,6 +84,7 @@ class ModelConfig(BaseModel):
 
     # --- Flash tasks (mechanical / high-volume) ---
     # Only override to True for A/B testing; production keeps these False.
+    use_pro_for_context_building: bool = False  # Flash by default (spec §Settings)
     use_pro_for_query_gen: bool = False
     use_pro_for_compression: bool = False
     use_pro_for_scoring: bool = False

@@ -14,7 +14,7 @@ Design rules:
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Optional, TypedDict
+from typing import Literal, Optional, TypedDict
 
 
 # ---------------------------------------------------------------------------
@@ -26,14 +26,12 @@ DepthLevel = Literal["surface", "intermediate", "in-depth"]
 SourceType = Literal["web", "arxiv", "content_lake", "files"]
 
 PlanningStatus = Literal[
-    "pending",            # initial state, not yet started
-    "analyzing",          # query_analyzer running
-    "needs_clarification",# clarifier returned questions, waiting for answers
-    "planning",           # plan_creator running
-    "reviewing",          # plan_reviewer running
-    "awaiting_approval",  # plan ready, waiting for human approval
-    "approved",           # plan_approved=True, ready to hand off to execution
-    "failed",             # unrecoverable error
+    "pending",             # initial state, not yet started
+    "analyzing",           # query_analyzer running
+    "needs_clarification", # query_analyzer returned questions, waiting for answers
+    "planning",            # plan_creator running
+    "awaiting_approval",   # plan ready, waiting for human approval via /run
+    "failed",              # unrecoverable error
 ]
 
 
@@ -83,7 +81,7 @@ class PlanSection(TypedDict):
 
 
 class ResearchPlan(TypedDict):
-    """The structured research plan produced by plan_creator and refined by plan_reviewer.
+    """The structured research plan produced by plan_creator.
 
     title:             report title (used as the HTML <h1>).
     summary:           2-4 sentence executive summary of the planned report.
@@ -108,6 +106,7 @@ class PlanningState(TypedDict):
     ------------
     Identity        — who triggered this research session
     Input context   — raw inputs passed by the API caller
+    Context         — LLM-generated prose summary produced by context_builder
     Topic           — original and LLM-refined topic strings
     Clarification   — loop state for the clarifier ↔ caller exchange
     Parameters      — resolved research configuration (depth, audience, …)
@@ -126,9 +125,13 @@ class PlanningState(TypedDict):
     # ------------------------------------------------------------------
     # Input context  (set once at graph entry, never mutated)
     # ------------------------------------------------------------------
-    chat_history: list[ChatMessage]     # recent turns provided for context
     uploaded_files: list[UploadedFile]  # file metadata; content loaded in context_builder
     file_contents: dict[str, str]       # object_id → extracted text (populated by context_builder)
+
+    # ------------------------------------------------------------------
+    # Context brief  (produced by context_builder via LLM)
+    # ------------------------------------------------------------------
+    context_brief: str          # LLM-generated prose summary of chat history + file contents
 
     # ------------------------------------------------------------------
     # Topic
@@ -139,13 +142,13 @@ class PlanningState(TypedDict):
     # ------------------------------------------------------------------
     # Clarification loop
     # ------------------------------------------------------------------
-    needs_clarification: bool           # True when clarifier decides questions are required
+    needs_clarification: bool           # True when query_analyzer decides questions are required
     clarification_questions: list[str]  # questions returned to the API caller
     clarification_answers: list[str]    # answers provided by the user (parallel list)
     clarification_count: int            # number of completed clarification rounds
 
     # ------------------------------------------------------------------
-    # Research parameters  (extracted by query_analyzer / clarifier)
+    # Research parameters  (extracted by query_analyzer)
     # ------------------------------------------------------------------
     depth_of_research: DepthLevel       # controls source count + compression target
     audience: str                       # e.g. "undergraduate students", "C-suite executives"
@@ -162,10 +165,9 @@ class PlanningState(TypedDict):
     # Plan
     # ------------------------------------------------------------------
     plan: Optional[ResearchPlan]    # None until plan_creator produces a plan
-    plan_approved: bool             # True after human-in-the-loop approval
-    plan_revision_count: int        # incremented each time plan_reviewer sends back to creator
-    checklist: list[str]            # quality checklist produced by plan_reviewer
-    self_review_count: int          # how many self-review loops plan_reviewer has completed
+    plan_revision_count: int        # incremented each time user rejects plan via Mode 3
+    plan_feedback: Optional[str]    # user's rejection feedback text (None on fresh creation)
+    checklist: list[str]            # quality gates produced by plan_creator (3-5 items)
 
     # ------------------------------------------------------------------
     # Lifecycle

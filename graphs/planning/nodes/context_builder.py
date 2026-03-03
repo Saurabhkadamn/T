@@ -3,39 +3,49 @@ context_builder — Planning Graph Node (Layer 1, Node 1)
 
 Responsibility
 --------------
-Load the text content of every uploaded file from the Redis cache and
-write it into state["file_contents"].  This is a pure-Python, no-LLM node —
-it does I/O only (Redis lookups) and normalises the uploaded_files list.
+Mode 1 only (fresh research request).  Does three things in sequence:
 
-Why it exists before query_analyzer
-------------------------------------
-query_analyzer and all downstream nodes need file contents in state so
-they can incorporate user-uploaded documents into their prompts.
-Centralising the cache lookup here means every other node can assume
-state["file_contents"] is fully populated.
+1. Fetch uploaded file contents from Redis.
+2. Fetch recent chat history from MongoDB (chatbot_histories collection).
+3. Call the LLM (Flash) to produce a concise ``context_brief`` — a
+   2000-3000 token prose summary of the chat context and file contents
+   that all downstream nodes read instead of raw inputs.
 
-Cache miss behaviour
----------------------
-If a file is not in Redis the content is set to an empty string and a
-warning is logged.  The node does NOT raise — a missing file should degrade
-gracefully (the research continues without that file's content).
+Why an LLM call here?
+----------------------
+query_analyzer used to receive raw chat_history + file_contents separately.
+The new spec collapses those into a single ``context_brief`` so that
+query_analyzer only needs one input field and its prompt stays predictable
+regardless of how much raw context exists.
+
+Failure behaviour
+-----------------
+- Redis miss for a file → degrade gracefully (empty string for that file).
+- MongoDB fetch failure  → degrade gracefully (empty chat history).
+- LLM failure           → returns status="failed" so the graph can surface
+                          the error to the API caller immediately.
 
 Node contract
 -------------
-Input  fields consumed: uploaded_files, tenant_id, topic_id
-Output fields written:  file_contents
+Input  fields consumed: uploaded_files, tenant_id, topic_id, chat_bot_id,
+                        original_topic
+Output fields written:  file_contents, context_brief
+                        On error: status="failed", error=<message>
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 import redis.asyncio as aioredis
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from app.config import settings
-from graphs.planning.state import PlanningState
+from app.llm_factory import get_llm
+from graphs.planning.state import ChatMessage, PlanningState
 
 logger = logging.getLogger(__name__)
 
@@ -45,86 +55,248 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _file_key(object_id: str) -> str:
-    """Return the Redis key for a cached file's extracted text content."""
     return f"file:{object_id}:content"
+
+
+# ---------------------------------------------------------------------------
+# MongoDB chat history fetch (swappable stub)
+# ---------------------------------------------------------------------------
+
+_CHAT_HISTORY_COLLECTION = "chatbot_histories"   # update here if collection name changes
+_CHAT_HISTORY_LIMIT = 20
+
+
+async def _fetch_chat_history(
+    mongo_client: Any,
+    chat_bot_id: str,
+    tenant_id: str,
+    limit: int = _CHAT_HISTORY_LIMIT,
+) -> list[ChatMessage]:
+    """Fetch recent chat turns for a chatbot session from MongoDB.
+
+    Returns an empty list on any error so context_builder degrades gracefully.
+    Collection schema assumed: {tenant_id, chat_bot_id, role, content, created_at}.
+    """
+    if mongo_client is None:
+        return []
+    try:
+        db = mongo_client[settings.mongo_db_name]
+        cursor = (
+            db[_CHAT_HISTORY_COLLECTION]
+            .find(
+                {"tenant_id": tenant_id, "chat_bot_id": chat_bot_id},
+                {"_id": 0, "role": 1, "content": 1},
+            )
+            .sort("created_at", -1)
+            .limit(limit)
+        )
+        docs = await cursor.to_list(length=limit)
+        # Reverse so oldest turn comes first (chronological order)
+        docs.reverse()
+        history: list[ChatMessage] = []
+        for d in docs:
+            role = d.get("role", "user")
+            content = d.get("content", "")
+            if role in ("user", "assistant") and content:
+                history.append({"role": role, "content": content})
+        return history
+    except Exception as exc:
+        logger.warning(
+            "context_builder: MongoDB chat history fetch failed — %s (degrading gracefully)", exc
+        )
+        return []
+
+
+# ---------------------------------------------------------------------------
+# LLM prompt
+# ---------------------------------------------------------------------------
+
+_SYSTEM_PROMPT = """\
+You are a context summariser for Kadal AI's deep research system.
+Your job is to read a user's research topic, their recent conversation history,
+and any uploaded file excerpts, then produce a single cohesive prose summary
+(the "context brief") that will be passed to the research planning pipeline.
+
+The context brief must:
+- Explain what the user is trying to research and why (based on conversation).
+- Highlight any constraints, preferences, or domain knowledge from the conversation.
+- Summarise key facts or themes from uploaded files that are relevant to the topic.
+- Be written in third-person neutral style, 300-500 words.
+- NOT include clarification questions — only summarise what is already known.
+
+Output plain prose only — no markdown headers, no bullet lists.
+"""
+
+_USER_PROMPT_TEMPLATE = """\
+## Research Topic
+{topic}
+
+## Recent Conversation History ({history_len} turns)
+{chat_history_text}
+
+## Uploaded File Excerpts
+{file_summary_text}
+
+---
+
+Write the context brief now.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _format_chat_history(history: list[ChatMessage]) -> str:
+    if not history:
+        return "(no conversation history)"
+    lines = []
+    for msg in history:
+        role = msg.get("role", "user").capitalize()
+        lines.append(f"{role}: {msg.get('content', '')}")
+    return "\n".join(lines)
+
+
+def _format_file_excerpts(file_contents: dict[str, str], uploaded_files: list[dict]) -> str:
+    if not uploaded_files:
+        return "(no uploaded files)"
+    lines = []
+    for f in uploaded_files:
+        oid = f["object_id"]
+        content = file_contents.get(oid, "")
+        if content:
+            snippet = content[:500].replace("\n", " ")
+            lines.append(f"[{f['filename']}]: {snippet}…")
+        else:
+            lines.append(f"[{f['filename']}]: (content unavailable)")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
 # Node
 # ---------------------------------------------------------------------------
 
-async def context_builder(state: PlanningState, config: RunnableConfig | None = None) -> dict[str, Any]:
-    """LangGraph node: load file contents from Redis into state.
+async def context_builder(
+    state: PlanningState, config: RunnableConfig | None = None
+) -> dict[str, Any]:
+    """LangGraph node: build context_brief from chat history + file contents.
 
     Parameters
     ----------
     state:  current PlanningState snapshot (read-only inside the node).
-    config: LangGraph run-time config dict (carries ``configurable`` sub-dict).
-            Pass a shared Redis client via config["configurable"]["redis_client"]
-            to avoid opening a new connection per invocation.
+    config: LangGraph run-time config dict.
+            Pass shared clients via config["configurable"]:
+              redis_client  — aioredis.Redis  (avoids opening a new connection)
+              mongo_client  — AsyncIOMotorClient (for chat history fetch)
 
     Returns
     -------
-    A partial state dict containing only the keys this node writes.
-    LangGraph merges the returned dict into the full state.
+    Partial state dict with keys: file_contents, context_brief.
+    On LLM failure: also writes status="failed", error=<message>.
     """
+    topic_id = state.get("topic_id", "")
+    tenant_id = state.get("tenant_id", "")
+    chat_bot_id = state.get("chat_bot_id", "")
     uploaded_files = state.get("uploaded_files") or []
+    original_topic = state.get("original_topic", "")
 
-    if not uploaded_files:
-        logger.debug(
-            "context_builder: no uploaded files for topic_id=%s — skipping Redis lookup",
-            state.get("topic_id"),
-        )
-        return {"file_contents": {}}
-
-    # Prefer a shared Redis client injected via LangGraph config; fall back to
-    # creating a short-lived connection so the node remains testable in isolation.
     configurable: dict = (config or {}).get("configurable", {}) if config else {}
-    shared_client: aioredis.Redis | None = configurable.get("redis_client")
-    owns_client = shared_client is None
+    shared_redis: aioredis.Redis | None = configurable.get("redis_client")
+    mongo_client: Any = configurable.get("mongo_client")
 
-    redis_client: aioredis.Redis
-    if shared_client is not None:
-        redis_client = shared_client
-    else:
-        redis_client = aioredis.Redis(
+    # ── Step 1: Load file contents from Redis ──────────────────────────────
+    file_contents: dict[str, str] = {}
+
+    if uploaded_files:
+        owns_redis = shared_redis is None
+        redis_client: aioredis.Redis = shared_redis or aioredis.Redis(
             host=settings.redis_host,
             password=settings.redis_password or None,
             decode_responses=True,
         )
+        try:
+            for file_meta in uploaded_files:
+                object_id: str = file_meta["object_id"]
+                content: str | None = await redis_client.get(_file_key(object_id))
+                if content is None:
+                    logger.warning(
+                        "context_builder: cache miss for object_id=%s (file=%s)",
+                        object_id,
+                        file_meta.get("filename", "<unknown>"),
+                    )
+                    file_contents[object_id] = ""
+                else:
+                    file_contents[object_id] = content
+        finally:
+            if owns_redis:
+                await redis_client.aclose()
 
-    file_contents: dict[str, str] = {}
+        logger.info(
+            "context_builder: loaded %d/%d file contents (topic_id=%s)",
+            sum(1 for v in file_contents.values() if v),
+            len(uploaded_files),
+            topic_id,
+        )
 
-    try:
-        for file_meta in uploaded_files:
-            object_id: str = file_meta["object_id"]
-            key = _file_key(object_id)
-            content: str | None = await redis_client.get(key)
-
-            if content is None:
-                logger.warning(
-                    "context_builder: cache miss for object_id=%s (file=%s) — "
-                    "proceeding without this file's content",
-                    object_id,
-                    file_meta.get("filename", "<unknown>"),
-                )
-                file_contents[object_id] = ""
-            else:
-                file_contents[object_id] = content
-                logger.debug(
-                    "context_builder: loaded %d chars for object_id=%s",
-                    len(content),
-                    object_id,
-                )
-    finally:
-        if owns_client:
-            await redis_client.aclose()
-
+    # ── Step 2: Fetch chat history from MongoDB ────────────────────────────
+    chat_history = await _fetch_chat_history(mongo_client, chat_bot_id, tenant_id)
     logger.info(
-        "context_builder: loaded content for %d/%d files (topic_id=%s)",
-        sum(1 for v in file_contents.values() if v),
-        len(uploaded_files),
-        state.get("topic_id"),
+        "context_builder: fetched %d chat turns (topic_id=%s)", len(chat_history), topic_id
     )
 
-    return {"file_contents": file_contents}
+    # ── Step 3: Call LLM to produce context_brief ─────────────────────────
+    user_prompt = _USER_PROMPT_TEMPLATE.format(
+        topic=original_topic,
+        history_len=len(chat_history),
+        chat_history_text=_format_chat_history(chat_history),
+        file_summary_text=_format_file_excerpts(file_contents, uploaded_files),
+    )
+
+    llm = get_llm("context_building", 0.3)
+    messages = [
+        SystemMessage(content=_SYSTEM_PROMPT),
+        HumanMessage(content=user_prompt),
+    ]
+
+    logger.info(
+        "context_builder: invoking %s for context_brief (topic_id=%s)",
+        settings.models.model_for("context_building"),
+        topic_id,
+    )
+
+    try:
+        response = await asyncio.wait_for(
+            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "context_builder: LLM timed out after %ds (topic_id=%s)",
+            settings.llm_timeout_seconds,
+            topic_id,
+        )
+        return {
+            "file_contents": file_contents,
+            "context_brief": "",
+            "status": "failed",
+            "error": "context_builder: LLM call timed out",
+        }
+    except Exception as exc:
+        logger.error("context_builder: LLM call failed — %s", exc)
+        return {
+            "file_contents": file_contents,
+            "context_brief": "",
+            "status": "failed",
+            "error": f"context_builder: LLM call failed — {exc}",
+        }
+
+    context_brief: str = response.content.strip()
+    logger.info(
+        "context_builder: context_brief produced (%d chars, topic_id=%s)",
+        len(context_brief),
+        topic_id,
+    )
+
+    return {
+        "file_contents": file_contents,
+        "context_brief": context_brief,
+    }

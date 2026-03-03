@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -24,11 +24,6 @@ class UploadedFileModel(BaseModel):
                            pattern=r"^[\w\-\.]+/[\w\-\.\+]+$")
 
 
-class ChatMessageModel(BaseModel):
-    role: Literal["user", "assistant"]
-    content: str
-
-
 class ToolsEnabledModel(BaseModel):
     web: bool = True
     arxiv: bool = True
@@ -41,33 +36,55 @@ class ToolsEnabledModel(BaseModel):
 # ---------------------------------------------------------------------------
 
 class PlanRequest(BaseModel):
-    """Request body for the planning endpoint."""
-    topic: str = Field(..., min_length=1, max_length=5000, description="Research topic / question")
+    """Request body for the planning endpoint.
+
+    Three invocation modes:
+      Mode 1 (fresh):      job_id=None, topic and chat_bot_id required.
+      Mode 2 (clarify):    job_id set, clarification_answers populated.
+      Mode 3 (revise):     job_id set, plan_feedback populated.
+    """
+    # Required on Mode 1; optional on Modes 2 & 3 (loaded from DB by job_id)
+    topic: Optional[str] = Field(
+        default=None, min_length=1, max_length=5000, description="Research topic / question"
+    )
+    chat_bot_id: Optional[str] = Field(
+        default=None, min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$"
+    )
 
     @field_validator("topic", mode="before")
     @classmethod
-    def strip_topic(cls, v: str) -> str:
+    def strip_topic(cls, v: Any) -> Any:
         if isinstance(v, str):
             v = v.strip()
             if not v:
                 raise ValueError("topic cannot be blank or whitespace-only")
         return v
+
     tenant_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
     user_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
-    chat_bot_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
-    chat_history: list[ChatMessageModel] = Field(default_factory=list)
     uploaded_files: list[UploadedFileModel] = Field(default_factory=list)
-    # Populated on second call (after user answers clarifying questions)
+    # Mode 2: answers to the clarification questions from the previous response
     clarification_answers: list[str] = Field(default_factory=list)
-    # Echo the questions received in the previous PlanResponse so the graph
-    # doesn't re-ask them on re-invocation.
+    # Echo of the questions from the previous PlanResponse (for graph re-entry)
     clarification_questions: list[str] = Field(default_factory=list)
-    # Re-invoke token — equals the job_id from the first PlanResponse.
-    # None on first call; client sends back the same job_id on clarification round.
+    # Mode 3: human reviewer's plain-text feedback on the plan
+    plan_feedback: Optional[str] = Field(default=None, max_length=5000)
+    # Re-invoke token — None on first call; echoed back by client on Modes 2 & 3
     job_id: Optional[str] = Field(
         default=None,
         pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     )
+
+    @model_validator(mode="after")
+    def validate_mode_requirements(self) -> "PlanRequest":
+        """Mode 1 requires topic + chat_bot_id; Modes 2/3 require job_id."""
+        if self.job_id is None:
+            # Mode 1
+            if not self.topic:
+                raise ValueError("topic is required when job_id is not provided (Mode 1)")
+            if not self.chat_bot_id:
+                raise ValueError("chat_bot_id is required when job_id is not provided (Mode 1)")
+        return self
 
 
 class PlanResponse(BaseModel):
