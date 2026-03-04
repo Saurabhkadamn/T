@@ -71,6 +71,8 @@ class JobStreamer:
             host=settings.redis_host,
             password=settings.redis_password or None,
             decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=5,
         )
 
     async def aclose(self) -> None:

@@ -63,7 +63,11 @@ async def _check_rate_limit(
 
     key = f"rate:run:{tenant_id}:{user_id}"
     ttl = settings.redis_ttls.rate_limit_run_ttl_seconds
-    allowed = await redis.eval(_RATE_LIMIT_SCRIPT, 1, key, limit, ttl)
+    try:
+        allowed = await redis.eval(_RATE_LIMIT_SCRIPT, 1, key, limit, ttl)
+    except Exception as exc:
+        logger.warning("run: rate-limit Redis error (failing open) — %s", exc)
+        return  # fail open
     if not allowed:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

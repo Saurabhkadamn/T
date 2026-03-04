@@ -213,11 +213,20 @@ async def context_builder(
             host=settings.redis_host,
             password=settings.redis_password or None,
             decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=5,
         )
         try:
             for file_meta in uploaded_files:
                 object_id: str = file_meta["object_id"]
-                content: str | None = await redis_client.get(_file_key(object_id))
+                try:
+                    content: str | None = await redis_client.get(_file_key(object_id))
+                except Exception as redis_exc:
+                    logger.warning(
+                        "context_builder: Redis error for object_id=%s — %s (treating as cache miss)",
+                        object_id, redis_exc,
+                    )
+                    content = None
                 if content is None:
                     logger.warning(
                         "context_builder: cache miss for object_id=%s (file=%s)",

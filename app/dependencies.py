@@ -33,10 +33,13 @@ _TENANT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 # Redis
 # ---------------------------------------------------------------------------
 
-async def get_redis(request: Request) -> Redis:
-    """Return the shared async Redis client from app state."""
-    redis: Redis = request.app.state.redis
-    return redis
+async def get_redis(request: Request) -> Redis | None:
+    """Return the shared async Redis client from app state.
+
+    Returns None if Redis was unavailable at startup.  All callers already
+    wrap Redis operations in try/except so a None value simply fails open.
+    """
+    return getattr(request.app.state, "redis", None)
 
 
 # ---------------------------------------------------------------------------

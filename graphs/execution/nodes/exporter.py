@@ -296,6 +296,8 @@ async def _publish_redis_status(
             host=settings.redis_host,
             password=settings.redis_password or None,
             decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=5,
         )
         async with client:
             status_key = f"job:{job_id}:status"

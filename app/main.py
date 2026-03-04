@@ -61,14 +61,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Non-fatal at startup — indexes may already exist from a previous run.
 
     logger.info("startup: initialising Redis connection pool …")
-    _redis_pool = aioredis.ConnectionPool(
-        host=settings.redis_host,
-        password=settings.redis_password or None,
-        max_connections=settings.redis_max_connections,
-        decode_responses=True,
-    )
-    app.state.redis = aioredis.Redis(connection_pool=_redis_pool)
-    logger.info("startup: Redis pool ready (max_connections=%d)", settings.redis_max_connections)
+    try:
+        _redis_pool = aioredis.ConnectionPool(
+            host=settings.redis_host,
+            password=settings.redis_password or None,
+            max_connections=settings.redis_max_connections,
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=5,
+        )
+        app.state.redis = aioredis.Redis(connection_pool=_redis_pool)
+        logger.info("startup: Redis client ready (max_connections=%d)", settings.redis_max_connections)
+    except Exception as exc:
+        logger.warning(
+            "startup: Redis init failed (%s) — API will start without Redis. "
+            "Rate-limiting, caching, and streaming will be unavailable until Redis recovers.",
+            exc,
+        )
+        app.state.redis = None
+
+    # Non-fatal connectivity check — log result, never block startup
+    if app.state.redis is not None:
+        try:
+            await app.state.redis.ping()
+            logger.info("startup: Redis ping OK")
+        except Exception as exc:
+            logger.warning(
+                "startup: Redis unreachable (%s) — API will start in degraded mode. "
+                "All Redis operations will fail open until Redis recovers.",
+                exc,
+            )
 
     logger.info("startup: initialising MongoDB client …")
     app.state.mongo = AsyncIOMotorClient(
