@@ -1,7 +1,6 @@
 # Planning Graph — Architecture
 
 > Single source of truth for the Planning Graph design.
-> Claude Code must follow this spec when implementing or modifying planning graph code.
 
 ---
 
@@ -514,3 +513,24 @@ All failures set: `status="failed"`, `error="<node_name>: <description>"`.
 - **No streaming.** The graph completes before the API responds.
 - **No direct DB writes from nodes.** Nodes are pure functions (state in, partial state out). Only the API route writes to MongoDB.
 - **No execution.** Execution is a separate graph triggered by `POST /api/deepresearch/run` after the user approves the plan.
+
+
+
+
+chatfriendly version :
+
+
+Layer 1 — Chat LLM (already exists):
+Give the existing chatbot LLM a tool called deep_research. When the user says something that needs research, the LLM decides to call it. The tool definition is simple:
+Tool: deep_research
+  topic: string       — the refined research query
+  depth: surface | intermediate | in-depth
+  audience: string
+  source_types: [web, arxiv, content_lake, files]
+The chat LLM fills these parameters from conversation context. It has already clarified the query through natural conversation. It knows the depth because the user said "I need something quick" or "give me everything." It knows the audience because the conversation makes it obvious.
+Layer 2 — Research Backend (simplified):
+The /plan endpoint receives one rich, pre-clarified request. Runs one node — plan_creator. One LLM call. Returns a structured plan with sections.
+The chat LLM presents the plan to the user: "Here's what I'd research — 6 sections covering X, Y, Z. Should I proceed?"
+User says "yes" → chat LLM calls execute_research(job_id) → your existing /run endpoint queues the job → worker executes → WebSocket streams progress. This part doesn't change at all.
+User says "change section 3 to focus on regulations" → chat LLM calls deep_research again with an updated topic. No Mode 3 state management needed.
+User says "nevermind" → the LLM just doesn't call the tool. Cancel for free.
