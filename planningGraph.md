@@ -533,4 +533,4 @@ The /plan endpoint receives one rich, pre-clarified request. Runs one node — p
 The chat LLM presents the plan to the user: "Here's what I'd research — 6 sections covering X, Y, Z. Should I proceed?"
 User says "yes" → chat LLM calls execute_research(job_id) → your existing /run endpoint queues the job → worker executes → WebSocket streams progress. This part doesn't change at all.
 User says "change section 3 to focus on regulations" → chat LLM calls deep_research again with an updated topic. No Mode 3 state management needed.
-User says "nevermind" → the LLM just doesn't call the tool. Cancel for free.
+User says "nevermind" → the LLM just doesn't call the tool. Cancel for free 
