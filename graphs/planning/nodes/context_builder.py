@@ -6,7 +6,7 @@ Responsibility
 Mode 1 only (fresh research request).  Does three things in sequence:
 
 1. Fetch uploaded file contents from Redis.
-2. Fetch recent chat history from MongoDB (chatbot_histories collection).
+2. Use ``state["chat_history"]`` passed directly in the request payload.
 3. Call the LLM (Flash) to produce a concise ``context_brief`` — a
    2000-3000 token prose summary of the chat context and file contents
    that all downstream nodes read instead of raw inputs.
@@ -21,13 +21,12 @@ regardless of how much raw context exists.
 Failure behaviour
 -----------------
 - Redis miss for a file → degrade gracefully (empty string for that file).
-- MongoDB fetch failure  → degrade gracefully (empty chat history).
 - LLM failure           → returns status="failed" so the graph can surface
                           the error to the API caller immediately.
 
 Node contract
 -------------
-Input  fields consumed: uploaded_files, tenant_id, topic_id, chat_bot_id,
+Input  fields consumed: uploaded_files, tenant_id, topic_id, chat_history,
                         original_topic
 Output fields written:  file_contents, context_brief
                         On error: status="failed", error=<message>
@@ -56,55 +55,6 @@ logger = logging.getLogger(__name__)
 
 def _file_key(object_id: str) -> str:
     return f"file:{object_id}:content"
-
-
-# ---------------------------------------------------------------------------
-# MongoDB chat history fetch (swappable stub)
-# ---------------------------------------------------------------------------
-
-_CHAT_HISTORY_COLLECTION = "chatbot_histories"   # update here if collection name changes
-_CHAT_HISTORY_LIMIT = 20
-
-
-async def _fetch_chat_history(
-    mongo_client: Any,
-    chat_bot_id: str,
-    tenant_id: str,
-    limit: int = _CHAT_HISTORY_LIMIT,
-) -> list[ChatMessage]:
-    """Fetch recent chat turns for a chatbot session from MongoDB.
-
-    Returns an empty list on any error so context_builder degrades gracefully.
-    Collection schema assumed: {tenant_id, chat_bot_id, role, content, created_at}.
-    """
-    if mongo_client is None:
-        return []
-    try:
-        db = mongo_client[settings.mongo_db_name]
-        cursor = (
-            db[_CHAT_HISTORY_COLLECTION]
-            .find(
-                {"tenant_id": tenant_id, "chat_bot_id": chat_bot_id},
-                {"_id": 0, "role": 1, "content": 1},
-            )
-            .sort("created_at", -1)
-            .limit(limit)
-        )
-        docs = await cursor.to_list(length=limit)
-        # Reverse so oldest turn comes first (chronological order)
-        docs.reverse()
-        history: list[ChatMessage] = []
-        for d in docs:
-            role = d.get("role", "user")
-            content = d.get("content", "")
-            if role in ("user", "assistant") and content:
-                history.append({"role": role, "content": content})
-        return history
-    except Exception as exc:
-        logger.warning(
-            "context_builder: MongoDB chat history fetch failed — %s (degrading gracefully)", exc
-        )
-        return []
 
 
 # ---------------------------------------------------------------------------
@@ -195,14 +145,12 @@ async def context_builder(
     On LLM failure: also writes status="failed", error=<message>.
     """
     topic_id = state.get("topic_id", "")
-    tenant_id = state.get("tenant_id", "")
-    chat_bot_id = state.get("chat_bot_id", "")
     uploaded_files = state.get("uploaded_files") or []
     original_topic = state.get("original_topic", "")
+    chat_history: list[ChatMessage] = state.get("chat_history") or []
 
     configurable: dict = (config or {}).get("configurable", {}) if config else {}
     shared_redis: aioredis.Redis | None = configurable.get("redis_client")
-    mongo_client: Any = configurable.get("mongo_client")
 
     # ── Step 1: Load file contents from Redis ──────────────────────────────
     file_contents: dict[str, str] = {}
@@ -247,13 +195,12 @@ async def context_builder(
             topic_id,
         )
 
-    # ── Step 2: Fetch chat history from MongoDB ────────────────────────────
-    chat_history = await _fetch_chat_history(mongo_client, chat_bot_id, tenant_id)
     logger.info(
-        "context_builder: fetched %d chat turns (topic_id=%s)", len(chat_history), topic_id
+        "context_builder: using %d chat turns from request payload (topic_id=%s)",
+        len(chat_history), topic_id,
     )
 
-    # ── Step 3: Call LLM to produce context_brief ─────────────────────────
+    # ── Step 2: Call LLM to produce context_brief ─────────────────────────
     user_prompt = _USER_PROMPT_TEMPLATE.format(
         topic=original_topic,
         history_len=len(chat_history),

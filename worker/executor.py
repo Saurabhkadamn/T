@@ -55,6 +55,7 @@ async def run(job_id: str) -> None:
     redis_client: aioredis.Redis | None = None
     checkpointer = None
     tenant_id: str = ""  # captured early so error handler can use it
+    job_doc: dict | None = None  # captured early so error handler can update rate-limit hash
 
     try:
         await streamer.connect()
@@ -224,6 +225,19 @@ async def run(job_id: str) -> None:
             {"$set": {"status": "completed", "progress": 100, "updated_at": _now_iso()}},
         )
 
+        # Update daily rate-limit hash: mark job as completed (not failed → counts toward limit)
+        _user_id = job_doc.get("user_id", "")
+        _created_date = job_doc.get("created_date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+        if _user_id:
+            try:
+                await redis_client.hset(
+                    f"rate:plan:day:{_user_id}:{_created_date}",
+                    job_id,
+                    "completed",
+                )
+            except Exception as _exc:
+                logger.warning("executor: could not update rate-limit hash — %s", _exc)
+
     except Exception as exc:
         logger.exception("executor: job_id=%s failed — %s", job_id, exc)
         await streamer.publish_error(str(exc))
@@ -247,6 +261,22 @@ async def run(job_id: str) -> None:
                 )
             except Exception as inner_exc:
                 logger.error("executor: failed to update job status — %s", inner_exc)
+
+        # Update daily rate-limit hash: mark job as failed (doesn't count toward limit)
+        if redis_client is not None and job_doc is not None:
+            _user_id = job_doc.get("user_id", "")
+            _created_date = job_doc.get(
+                "created_date", datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            )
+            if _user_id:
+                try:
+                    await redis_client.hset(
+                        f"rate:plan:day:{_user_id}:{_created_date}",
+                        job_id,
+                        "failed",
+                    )
+                except Exception as _exc:
+                    logger.warning("executor: could not update rate-limit hash on failure — %s", _exc)
 
     finally:
         if checkpointer is not None:

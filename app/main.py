@@ -106,10 +106,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # ── Shutdown ──────────────────────────────────────────────────────────
     logger.info("shutdown: closing Redis …")
-    try:
-        await app.state.redis.aclose()
-    except Exception as exc:
-        logger.error("shutdown: Redis close error — %s", exc)
+    if app.state.redis is not None:
+        try:
+            await app.state.redis.aclose()
+        except Exception as exc:
+            logger.error("shutdown: Redis close error — %s", exc)
 
     logger.info("shutdown: closing MongoDB …")
     try:

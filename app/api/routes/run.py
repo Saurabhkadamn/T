@@ -31,7 +31,7 @@ from redis.asyncio import Redis
 
 from app.api.models import RunRequest, RunResponse
 from app.config import settings
-from app.dependencies import get_mongo, get_redis, get_tenant_id
+from app.dependencies import TokenUser, get_current_user, get_mongo, get_redis
 
 logger = logging.getLogger(__name__)
 
@@ -83,19 +83,15 @@ async def _check_rate_limit(
 )
 async def run(
     body: RunRequest,
-    tenant_id: str = Depends(get_tenant_id),
+    current_user: TokenUser = Depends(get_current_user),
     redis: Redis = Depends(get_redis),
     mongo: AsyncIOMotorClient = Depends(get_mongo),
 ) -> RunResponse:
-    # ── Tenant consistency check ───────────────────────────────────────────
-    if body.tenant_id != tenant_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="tenant_id in body must match X-Tenant-ID header",
-        )
+    tenant_id = current_user.tenant_id
+    user_id = current_user.user_id
 
     # ── Rate limiting ──────────────────────────────────────────────────────
-    await _check_rate_limit(redis, tenant_id, body.user_id)
+    await _check_rate_limit(redis, tenant_id, user_id)
 
     db = mongo[settings.mongo_db_name]
 
@@ -116,6 +112,22 @@ async def run(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Job {body.job_id!r} not found",
         )
+
+    # ── Handle cancel action ───────────────────────────────────────────────
+    if body.action == "cancel":
+        try:
+            await db["Deep_Research_Jobs"].update_one(
+                {"job_id": body.job_id, "tenant_id": tenant_id},
+                {"$set": {"status": "cancelled", "updated_at": datetime.now(timezone.utc).isoformat()}},
+            )
+        except Exception as exc:
+            logger.exception("run: failed to cancel job_id=%s", body.job_id)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to cancel job: {exc}",
+            ) from exc
+        logger.info("run: cancelled job_id=%s tenant_id=%s", body.job_id, tenant_id)
+        return RunResponse(job_id=body.job_id, status="cancelled")
 
     if job_doc.get("status") != "plans_ready":
         raise HTTPException(
@@ -153,7 +165,7 @@ async def run(
         "report_id": report_id,
         "job_id": body.job_id,
         "tenant_id": tenant_id,
-        "user_id": body.user_id,
+        "user_id": user_id,
         "topic": job_doc.get("topic", ""),
         "title": plan.get("title", job_doc.get("topic", "")),
         "chat_bot_id": job_doc.get("chat_bot_id", ""),

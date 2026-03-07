@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -129,7 +129,6 @@ class RedisTTLConfig(BaseModel):
 
     job_status_ttl_seconds: int = 86_400        # 24 hr
     source_score_ttl_seconds: int = 604_800     # 7 days
-    rate_limit_plan_ttl_seconds: int = 3_600    # 1 hr window
     rate_limit_run_ttl_seconds: int = 3_600     # 1 hr window
 
 
@@ -260,9 +259,18 @@ class Settings(BaseSettings):
     planning_timeout_seconds: int = 180
 
     # ------------------------------------------------------------------
-    # Rate limits (None = unlimited — revisit once tenancy model is set)
+    # Keycloak (note: preserving "KEYCLOACK" typo to match calling services)
     # ------------------------------------------------------------------
-    rate_limit_plan_per_hour: int | None = None
+    keycloak_introspect_url: str = Field("", alias="KEYCLOACK_INTROSPECT_URL")
+
+    # ------------------------------------------------------------------
+    # Rate limits
+    # ------------------------------------------------------------------
+    # Daily plan quota — tracked in Redis hash per user per UTC date.
+    # None = unlimited.
+    rate_limit_plan_per_day: int | None = None
+    # TTL for the daily plan rate-limit hash (25 hours — covers full day + buffer)
+    rate_limit_plan_daily_ttl_seconds: int = 90_000
     rate_limit_run_per_hour: int | None = None
     max_concurrent_jobs_per_tenant: int | None = None
 

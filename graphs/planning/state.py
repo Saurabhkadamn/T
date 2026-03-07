@@ -125,6 +125,7 @@ class PlanningState(TypedDict):
     # ------------------------------------------------------------------
     # Input context  (set once at graph entry, never mutated)
     # ------------------------------------------------------------------
+    chat_history: list[ChatMessage]     # conversation turns passed in at request time
     uploaded_files: list[UploadedFile]  # file metadata; content loaded in context_builder
     file_contents: dict[str, str]       # object_id → extracted text (populated by context_builder)
 

@@ -16,19 +16,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # Shared sub-models
 # ---------------------------------------------------------------------------
 
-class UploadedFileModel(BaseModel):
-    """File metadata mirroring graphs/planning/state.py UploadedFile TypedDict."""
-    object_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
-    filename: str = Field(..., min_length=1, max_length=255)
-    mime_type: str = Field(..., min_length=3, max_length=100,
-                           pattern=r"^[\w\-\.]+/[\w\-\.\+]+$")
-
-
-class ToolsEnabledModel(BaseModel):
-    web: bool = True
-    arxiv: bool = True
-    content_lake: bool = False
-    files: bool = False
+class ChatMessageModel(BaseModel):
+    """A single conversation turn passed directly in the request payload."""
+    role: Literal["user", "assistant"]
+    content: str = Field(..., max_length=10000)
 
 
 # ---------------------------------------------------------------------------
@@ -39,16 +30,16 @@ class PlanRequest(BaseModel):
     """Request body for the planning endpoint.
 
     Three invocation modes:
-      Mode 1 (fresh):      job_id=None, topic and chat_bot_id required.
-      Mode 2 (clarify):    job_id set, clarification_answers populated.
-      Mode 3 (revise):     job_id set, plan_feedback populated.
+      Mode 1 (fresh):   job_id=None, topic required.
+      Mode 2 (clarify): job_id set, clarification_answers populated.
+      Mode 3 (revise):  job_id set, plan_feedback populated.
+
+    Auth (tenant_id + user_id) comes from the Keycloak Bearer token,
+    not from the request body.
     """
     # Required on Mode 1; optional on Modes 2 & 3 (loaded from DB by job_id)
     topic: Optional[str] = Field(
         default=None, min_length=1, max_length=5000, description="Research topic / question"
-    )
-    chat_bot_id: Optional[str] = Field(
-        default=None, min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$"
     )
 
     @field_validator("topic", mode="before")
@@ -60,9 +51,13 @@ class PlanRequest(BaseModel):
                 raise ValueError("topic cannot be blank or whitespace-only")
         return v
 
-    tenant_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
-    user_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
-    uploaded_files: list[UploadedFileModel] = Field(default_factory=list)
+    # Conversation history passed directly by the caller (not fetched from MongoDB)
+    chat_history: list[ChatMessageModel] = Field(default_factory=list)
+    # Attached files: [{object_id, filename, mime_type, ...}]
+    objects: list[dict[str, str]] = Field(default_factory=list)
+    # Tool selection: ["web", "arxiv", "content_lake", "files"]
+    tools: list[str] = Field(default_factory=list)
+
     # Mode 2: answers to the clarification questions from the previous response
     clarification_answers: list[str] = Field(default_factory=list)
     # Echo of the questions from the previous PlanResponse (for graph re-entry)
@@ -77,13 +72,11 @@ class PlanRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_mode_requirements(self) -> "PlanRequest":
-        """Mode 1 requires topic + chat_bot_id; Modes 2/3 require job_id."""
+        """Mode 1 requires topic; Modes 2/3 require job_id."""
         if self.job_id is None:
             # Mode 1
             if not self.topic:
                 raise ValueError("topic is required when job_id is not provided (Mode 1)")
-            if not self.chat_bot_id:
-                raise ValueError("chat_bot_id is required when job_id is not provided (Mode 1)")
         return self
 
 
@@ -103,6 +96,7 @@ class PlanResponse(BaseModel):
                                                         #  domain, recency_scope, source_scope, assumptions}
     plan: Optional[dict[str, Any]] = None               # ResearchPlan as plain dict
     checklist: list[str] = Field(default_factory=list)
+    max_revisions_reached: bool = False
     error: Optional[str] = None
 
 
@@ -114,17 +108,16 @@ class RunRequest(BaseModel):
     """Request body for the run (execution) endpoint.
 
     Loads the approved plan from deep_research_jobs by job_id and queues execution.
+    Auth (tenant_id + user_id) comes from the Keycloak Bearer token.
     """
     job_id: str
-    tenant_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
-    user_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
-    action: Literal["approve"] = "approve"
+    action: Literal["approve", "cancel"] = "approve"
 
 
 class RunResponse(BaseModel):
     job_id: str
-    report_id: str
-    status: Literal["research_queued"] = "research_queued"
+    report_id: Optional[str] = None
+    status: Literal["research_queued", "cancelled"] = "research_queued"
 
 
 # ---------------------------------------------------------------------------
