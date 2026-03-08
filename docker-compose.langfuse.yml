@@ -1,0 +1,82 @@
+# docker-compose.langfuse.yml
+#
+# Self-hosted Langfuse stack — runs independently of the main app compose.
+#
+# Usage:
+#   docker compose -f docker-compose.langfuse.yml up -d
+#   open http://localhost:3000 → create account → create project → copy keys
+#
+# IMPORTANT: Change every "changeme" value before deploying to any shared env.
+
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL — Langfuse primary datastore ──────────────────────────────
+  langfuse-db:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: changeme        # CHANGEME
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── MinIO — blob / media storage for Langfuse ────────────────────────────
+  langfuse-minio:
+    image: minio/minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: langfuse
+      MINIO_ROOT_PASSWORD: changeme      # CHANGEME
+    volumes:
+      - langfuse_minio_data:/data
+    ports:
+      - "9090:9000"    # MinIO API  — bind to 127.0.0.1 only in prod
+      - "9091:9001"    # MinIO console
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Langfuse UI + API ────────────────────────────────────────────────────
+  langfuse-web:
+    image: langfuse/langfuse:latest
+    restart: unless-stopped
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:changeme@langfuse-db:5432/langfuse
+
+      # NextAuth — required; generate a secure random string for prod
+      NEXTAUTH_SECRET: changeme-secret   # CHANGEME
+      NEXTAUTH_URL: http://localhost:3000
+
+      # Encryption salt for stored credentials
+      SALT: changeme-salt                # CHANGEME
+
+      # MinIO / S3 media storage
+      LANGFUSE_S3_MEDIA_UPLOAD_ENABLED: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: changeme   # CHANGEME
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: us-east-1
+
+volumes:
+  langfuse_db_data:
+  langfuse_minio_data:

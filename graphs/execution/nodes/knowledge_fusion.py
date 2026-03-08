@@ -29,7 +29,6 @@ Output fields written:  fused_knowledge, status="fusing"
 """
 
 from __future__ import annotations
-
 import asyncio
 import logging
 from typing import Any
@@ -39,6 +38,7 @@ from langchain_core.runnables import RunnableConfig
 
 from app.config import settings
 from app.llm_factory import get_llm
+from app.tracing import node_span
 from graphs.execution.state import (
     Citation,
     CompressedFinding,
@@ -190,6 +190,7 @@ def _format_findings(
 # Node
 # ---------------------------------------------------------------------------
 
+@node_span("knowledge_fusion")
 async def knowledge_fusion(
     state: ExecutionState, config: RunnableConfig | None = None
 ) -> dict[str, Any]:
@@ -238,7 +239,7 @@ async def knowledge_fusion(
 
     try:
         response = await asyncio.wait_for(
-            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+            llm.ainvoke(messages, config=config), timeout=settings.llm_timeout_seconds
         )
         fused_knowledge: str = response.content.strip()
     except asyncio.TimeoutError:

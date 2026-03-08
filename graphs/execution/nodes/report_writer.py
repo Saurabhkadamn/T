@@ -46,6 +46,7 @@ from langchain_core.runnables import RunnableConfig
 
 from app.config import settings
 from app.llm_factory import get_llm
+from app.tracing import node_span
 from graphs.execution.state import Citation, ExecutionState
 
 logger = logging.getLogger(__name__)
@@ -167,6 +168,7 @@ def _format_citation_index(citations: list[Citation]) -> str:
 # Node
 # ---------------------------------------------------------------------------
 
+@node_span("report_writer")
 async def report_writer(
     state: ExecutionState, config: RunnableConfig | None = None
 ) -> dict[str, Any]:
@@ -231,7 +233,7 @@ async def report_writer(
 
     try:
         response = await asyncio.wait_for(
-            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+            llm.ainvoke(messages, config=config), timeout=settings.llm_timeout_seconds
         )
         report_html: str = response.content.strip()
     except asyncio.TimeoutError:

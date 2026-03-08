@@ -32,6 +32,7 @@ import redis.asyncio as aioredis
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from app.config import settings
+from app.tracing import extract_trace_context, get_callback_handler, get_tracer
 from graphs.execution.graph import build_execution_graph
 from graphs.execution.nodes.exporter import close_exporter_clients
 from graphs.execution.state import ExecutionState, ToolsEnabled
@@ -54,6 +55,7 @@ async def run(job_id: str) -> None:
     mongo_client: AsyncIOMotorClient | None = None
     redis_client: aioredis.Redis | None = None
     checkpointer = None
+    _exec_span = None   # OTEL execution span — opened after job_doc is loaded
     tenant_id: str = ""  # captured early so error handler can use it
     job_doc: dict | None = None  # captured early so error handler can update rate-limit hash
 
@@ -75,6 +77,13 @@ async def run(job_id: str) -> None:
             raise ValueError(f"Job {job_id!r} not found in deep_research_jobs")
 
         tenant_id = job_doc["tenant_id"]
+
+        # ── Reconstruct parent trace context from API service ──────────────
+        # The /run endpoint stored the W3C carrier in metadata.otel_carrier so
+        # the Worker span becomes a child of the originating HTTP request span —
+        # same trace_id across both services.
+        _otel_carrier: dict = (job_doc.get("metadata") or {}).get("otel_carrier") or {}
+        _parent_ctx = extract_trace_context(_otel_carrier)
 
         # ── 2. Load file contents from Redis ───────────────────────────────
         uploaded_files: list[dict] = job_doc.get("uploaded_files", [])
@@ -130,6 +139,36 @@ async def run(job_id: str) -> None:
             "otel_trace_id": "",
         }
 
+        # ── Open OTEL child span for the full execution ────────────────────
+        # Becomes a child of the /run request span — same trace_id.
+        _tracer = get_tracer("kadal.worker")
+        _exec_span = _tracer.start_as_current_span(
+            "execution",
+            context=_parent_ctx,
+            attributes={
+                "job_id": job_id,
+                "tenant_id": tenant_id,
+                "report_id": initial_state["report_id"],
+            },
+        )
+        _exec_span.__enter__()
+
+        # Derive real OTEL trace_id from the active span
+        def _format_trace_id(span) -> str:
+            try:
+                ctx = span.get_span_context()
+                if not ctx.is_valid:
+                    return ""
+                if not isinstance(ctx.trace_id, int):
+                    logger.warning("executor: unexpected trace_id type: %r", type(ctx.trace_id))
+                    return ""
+                return format(ctx.trace_id, "032x")
+            except Exception as exc:
+                logger.warning("executor: _format_trace_id failed — %s", exc)
+                return ""
+
+        initial_state["otel_trace_id"] = _format_trace_id(_exec_span)
+
         # Mark job as running in MongoDB
         started_at = _now_iso()
         await db["Deep_Research_Jobs"].update_one(
@@ -152,7 +191,24 @@ async def run(job_id: str) -> None:
 
         # ── 4. Build execution graph ───────────────────────────────────────
         graph, checkpointer = await build_execution_graph()
-        config = {"configurable": {"thread_id": job_id}}
+
+        lf_handler = get_callback_handler(
+            trace_name=f"execution:{job_id}",
+            user_id=initial_state["user_id"],
+            session_id=job_id,
+            metadata={
+                "tenant_id": initial_state["tenant_id"],
+                "report_id": initial_state["report_id"],
+                "topic": (initial_state.get("topic") or "")[:200],
+                "otel_trace_id": initial_state["otel_trace_id"],
+                "otel_collector": settings.otel_collector_endpoint,
+            },
+            tags=["execution", initial_state["tenant_id"]],
+        )
+
+        config: dict = {"configurable": {"thread_id": job_id}}
+        if lf_handler:
+            config["callbacks"] = [lf_handler]
 
         await streamer.publish_progress(5, job_status="research")
 
@@ -279,6 +335,12 @@ async def run(job_id: str) -> None:
                     logger.warning("executor: could not update rate-limit hash on failure — %s", _exc)
 
     finally:
+        # Close OTEL execution span (None-safe — may not have been opened on early errors)
+        if _exec_span is not None:
+            try:
+                _exec_span.__exit__(None, None, None)
+            except Exception:
+                pass
         if checkpointer is not None:
             try:
                 await checkpointer.aclose()

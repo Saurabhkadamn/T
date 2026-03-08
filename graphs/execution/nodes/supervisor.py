@@ -66,6 +66,7 @@ from langgraph.types import Send
 
 from app.config import settings
 from app.llm_factory import get_llm
+from app.tracing import node_span
 from graphs.execution.state import (
     CompressedFinding,
     ExecutionState,
@@ -259,6 +260,7 @@ def _build_gap_section_state(
 # Node
 # ---------------------------------------------------------------------------
 
+@node_span("supervisor")
 async def supervisor(state: ExecutionState, config: RunnableConfig | None = None) -> dict[str, Any]:
     """LangGraph node — orchestrates parallel section research.
 
@@ -338,7 +340,7 @@ async def supervisor(state: ExecutionState, config: RunnableConfig | None = None
 
     try:
         response = await asyncio.wait_for(
-            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+            llm.ainvoke(messages, config=config), timeout=settings.llm_timeout_seconds
         )
         knowledge_gaps = _parse_reflection(response.content)
     except asyncio.TimeoutError:

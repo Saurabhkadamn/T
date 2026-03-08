@@ -172,7 +172,7 @@ async def query_analyzer(
 
     try:
         response = await asyncio.wait_for(
-            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+            llm.ainvoke(messages, config=config), timeout=settings.llm_timeout_seconds
         )
     except asyncio.TimeoutError:
         logger.error(

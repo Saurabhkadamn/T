@@ -26,9 +26,10 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI
@@ -38,7 +39,35 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from app.api.routes import plan, reports, run, status
 from app.api.websocket import router as ws_router
 from app.config import settings
+from app.tracing import init_langfuse, init_otel
 from db.indexes import setup_all_indexes
+
+
+# ---------------------------------------------------------------------------
+# JSON log formatter — injects OTEL trace_id/span_id into every log line
+# (otelTraceID / otelSpanID are added automatically by LoggingInstrumentor)
+# ---------------------------------------------------------------------------
+
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        out: dict[str, Any] = {
+            "ts": self.formatTime(record),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+            "trace_id": getattr(record, "otelTraceID", ""),
+            "span_id": getattr(record, "otelSpanID", ""),
+            "service": settings.otel_service_name,
+        }
+        if record.exc_info:
+            out["exc"] = self.formatException(record.exc_info)
+        return json.dumps(out)
+
+
+_json_handler = logging.StreamHandler()
+_json_handler.setFormatter(_JsonFormatter())
+logging.root.addHandler(_json_handler)
+logging.root.setLevel(logging.INFO)
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +131,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     logger.info("startup: MongoDB client ready (maxPoolSize=%d)", settings.mongo_max_pool_size)
 
+    logger.info("startup: initialising OTEL …")
+    init_otel()
+
+    logger.info("startup: initialising Langfuse …")
+    init_langfuse()
+
     yield
 
     # ── Shutdown ──────────────────────────────────────────────────────────
@@ -138,6 +173,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# FastAPI auto-instrumentation — creates a root OTEL span per HTTP request and
+# propagates W3C traceparent from inbound headers.  Must be applied after app
+# creation.  No-op when opentelemetry-instrumentation-fastapi is not installed.
+try:
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    FastAPIInstrumentor.instrument_app(app, excluded_urls="/health")
+except ImportError:
+    pass
 
 
 @app.get("/health", tags=["health"])

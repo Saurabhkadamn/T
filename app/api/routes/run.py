@@ -32,6 +32,7 @@ from redis.asyncio import Redis
 from app.api.models import RunRequest, RunResponse
 from app.config import settings
 from app.dependencies import TokenUser, get_current_user, get_mongo, get_redis
+from app.tracing import inject_trace_carrier
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,9 @@ async def run(
     report_id = str(uuid.uuid4())
     now_iso = datetime.now(timezone.utc).isoformat()
 
+    # ── Inject OTEL carrier so Worker can continue the same trace ─────────
+    otel_carrier = inject_trace_carrier()
+
     # ── Update deep_research_jobs ──────────────────────────────────────────
     try:
         await db["Deep_Research_Jobs"].update_one(
@@ -150,6 +154,8 @@ async def run(
                 "status": "research_queued",
                 "report_id": report_id,
                 "updated_at": now_iso,
+                "metadata.otel_carrier": otel_carrier,
+                "metadata.otel_trace_id": otel_carrier.get("traceparent", ""),
             }},
         )
     except Exception as exc:

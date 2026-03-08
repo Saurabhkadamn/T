@@ -39,6 +39,7 @@ from langchain_core.runnables import RunnableConfig
 
 from app.config import settings
 from app.llm_factory import get_llm
+from app.tracing import node_span
 from graphs.execution.state import ExecutionState
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,7 @@ def _parse_verdict(raw: str) -> tuple[str, str | None]:
 # Node
 # ---------------------------------------------------------------------------
 
+@node_span("report_reviewer")
 async def report_reviewer(
     state: ExecutionState, config: RunnableConfig | None = None
 ) -> dict[str, Any]:
@@ -162,7 +164,7 @@ async def report_reviewer(
 
     try:
         response = await asyncio.wait_for(
-            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+            llm.ainvoke(messages, config=config), timeout=settings.llm_timeout_seconds
         )
         verdict, feedback = _parse_verdict(response.content)
     except asyncio.TimeoutError:

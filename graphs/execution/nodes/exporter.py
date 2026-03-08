@@ -54,6 +54,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from langchain_core.runnables import RunnableConfig
 
 from app.config import settings
+from app.tracing import node_span
 from graphs.execution.state import Citation, ExecutionState, SourceScore
 
 logger = logging.getLogger(__name__)
@@ -327,6 +328,7 @@ async def _publish_redis_status(
 # Node
 # ---------------------------------------------------------------------------
 
+@node_span("exporter")
 async def exporter(
     state: ExecutionState, config: RunnableConfig | None = None
 ) -> dict[str, Any]:

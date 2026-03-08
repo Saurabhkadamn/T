@@ -43,6 +43,7 @@ from redis.asyncio import Redis
 from app.api.models import PlanRequest, PlanResponse
 from app.config import settings
 from app.dependencies import TokenUser, get_current_user, get_mongo, get_redis
+from app.tracing import get_callback_handler, inject_trace_carrier
 from graphs.planning.graph import planning_graph
 from graphs.planning.state import PlanningState
 
@@ -157,6 +158,7 @@ async def _save_job_doc(
     llm_model: str,
     now_iso: str,
     existing_doc: dict | None,
+    otel_carrier: dict | None = None,
 ) -> None:
     """Upsert the Deep_Research_Jobs document after every invocation."""
     graph_status = result.get("status", "unknown")
@@ -202,13 +204,16 @@ async def _save_job_doc(
             "files": "files" in (result.get("source_scope") or []),
         },
         "planning_state": _extract_planning_state_subdoc(result),
-        "metadata": (existing_doc or {}).get("metadata", {
-            "otel_trace_id": "",
-            "total_tokens_used": 0,
-            "total_cost_usd": 0.0,
-            "pro_calls": 0,
-            "flash_calls": 0,
-        }),
+        "metadata": {
+            **(existing_doc or {}).get("metadata", {
+                "otel_trace_id": "",
+                "total_tokens_used": 0,
+                "total_cost_usd": 0.0,
+                "pro_calls": 0,
+                "flash_calls": 0,
+            }),
+            **({"otel_carrier": otel_carrier, "otel_trace_id": (otel_carrier or {}).get("traceparent", "")} if otel_carrier else {}),
+        },
         "started_at": None,
         "completed_at": None,
         "error": result.get("error"),
@@ -388,17 +393,32 @@ async def plan(
         await _consume_rate_limit(redis, user_id, job_id)
 
     # ── Run planning graph ─────────────────────────────────────────────────
+    # Capture carrier before the graph runs so Langfuse trace links to the request span
+    _pre_graph_carrier = inject_trace_carrier()
+    lf_handler = get_callback_handler(
+        trace_name=f"plan:{job_id}",
+        user_id=user_id,
+        session_id=job_id,
+        metadata={
+            "tenant_id": tenant_id,
+            "topic": (body.topic or "")[:200],
+            "otel_trace_id": _pre_graph_carrier.get("traceparent", ""),
+        },
+        tags=["planning", tenant_id],
+    )
+
+    graph_config: dict = {
+        "configurable": {
+            "thread_id": job_id,
+            "redis_client": redis,
+        },
+    }
+    if lf_handler:
+        graph_config["callbacks"] = [lf_handler]
+
     try:
         result = await asyncio.wait_for(
-            planning_graph.ainvoke(
-                initial_state,
-                config={
-                    "configurable": {
-                        "thread_id": job_id,
-                        "redis_client": redis,
-                    },
-                },
-            ),
+            planning_graph.ainvoke(initial_state, config=graph_config),
             timeout=settings.planning_timeout_seconds,
         )
     except asyncio.TimeoutError as exc:
@@ -425,6 +445,9 @@ async def plan(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=result.get("error") or "Planning graph failed with unknown error",
         )
+
+    # ── Capture OTEL carrier (must be called while the request span is active) ─
+    otel_carrier = inject_trace_carrier()
 
     # ── Persist state to MongoDB (EVERY invocation) ────────────────────────
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -455,6 +478,7 @@ async def plan(
             llm_model=llm_model,
             now_iso=now_iso,
             existing_doc=existing_doc,
+            otel_carrier=otel_carrier,
         )
     except Exception as exc:
         logger.error("plan: failed to save planning state to MongoDB — %s", exc)

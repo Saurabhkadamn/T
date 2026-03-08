@@ -231,7 +231,7 @@ async def search_query_gen(
 
     try:
         response = await asyncio.wait_for(
-            llm.ainvoke(messages), timeout=settings.llm_timeout_seconds
+            llm.ainvoke(messages, config=config), timeout=settings.llm_timeout_seconds
         )
         queries = _parse_response(response.content)
     except asyncio.TimeoutError:

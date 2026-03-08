@@ -149,7 +149,6 @@ class Settings(BaseSettings):
 
     Required vars (no defaults — startup fails if missing):
         MONGO_URI, REDIS_HOST, GEMINI_API_KEY, S3_BUCKET,
-        LANGFUSE_HOST, OTEL_COLLECTOR_ENDPOINT,
         TAVILY_API_KEY, SERPER_API_KEY
     """
 
@@ -168,11 +167,22 @@ class Settings(BaseSettings):
     redis_password: str = ""
     gemini_api_key: str
     s3_bucket: str
-    langfuse_host: str
-    otel_collector_endpoint: str
+    otel_collector_endpoint: str = ""
+    otel_enabled: bool = True
+    otel_service_name: str = "kadal-deepresearch-api"   # override for worker: OTEL_SERVICE_NAME=kadal-deepresearch-worker
+    otel_service_version: str = "1.0.0"
+    otel_sample_rate: float = 1.0                        # 1.0 = 100%; lower in prod
     tavily_api_key: str
     serper_api_key: str
     content_lake_url: str = ""          # optional — only used when tools.content_lake=true
+
+    # ------------------------------------------------------------------
+    # Langfuse observability (self-hosted)
+    # ------------------------------------------------------------------
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_base_url: str = "http://localhost:3000"   # self-hosted default
+    langfuse_enabled: bool = True                       # set False in unit tests
 
     # ------------------------------------------------------------------
     # LLM provider selection
