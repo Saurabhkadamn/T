@@ -9,7 +9,8 @@
       "Bash(curl:*)",
       "WebSearch",
       "WebFetch(domain:langfuse.com)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(grep:*)"
     ]
   }
 }

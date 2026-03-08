@@ -38,13 +38,16 @@ _UUID4_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a
 async def get_status(
     job_id: str = Path(..., min_length=36, max_length=36, pattern=_UUID4_PATTERN),
     tenant_id: str = Depends(get_tenant_id),
-    redis: Redis = Depends(get_redis),
+    redis: Redis | None = Depends(get_redis),
     mongo: AsyncIOMotorClient = Depends(get_mongo),
 ) -> StatusResponse:
     # ── Redis fast path ────────────────────────────────────────────────────
     redis_key = f"job:{job_id}:status"
     try:
-        redis_data = await redis.hgetall(redis_key)
+        if redis is not None:
+            redis_data = await redis.hgetall(redis_key)
+        else:
+            redis_data = {}
     except Exception as exc:
         logger.warning("status: Redis hgetall failed — %s", exc)
         redis_data = {}

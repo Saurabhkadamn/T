@@ -64,13 +64,14 @@ from graphs.execution.state import (
 
 logger = logging.getLogger(__name__)
 
-# Approx chars per token for budget estimation.  Used only for logging/
-# truncation of input; the LLM enforces the actual token budget.
+# Approx chars per token for budget estimation.  Used only for logging.
 _CHARS_PER_TOKEN = 4
 
-# Max chars per source fed to the compressor.  Prevents a single large web
-# page from dominating the prompt.
-_MAX_CHARS_PER_SOURCE = 8_000
+# Absolute safety ceiling — prevents a single pathological source (e.g. a
+# 10 MB scraped page) from consuming Flash's entire context window.
+# Normal depth-based limits (25 K / 35 K / 50 K chars) are much lower and
+# come from state["max_chars_per_source"], so this ceiling is rarely hit.
+_ABSOLUTE_MAX_CHARS_PER_SOURCE = 200_000  # ≈ 50 K tokens
 
 _TRUST_TIER: dict[SourceType, int] = {
     "files": 1,
@@ -119,8 +120,13 @@ Produce the compressed summary now.
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _build_sources_block(results: list[RawSearchResult]) -> str:
-    """Format raw results as labelled source blocks for the prompt."""
+def _build_sources_block(results: list[RawSearchResult], max_chars: int) -> str:
+    """Format raw results as labelled source blocks for the prompt.
+
+    max_chars is the depth-appropriate per-source character limit read from
+    state["max_chars_per_source"].  It replaces the old hardcoded 8,000-char
+    constant so surface/intermediate/in-depth jobs each get the right budget.
+    """
     lines: list[str] = []
     for i, r in enumerate(results, start=1):
         label = f"[S{i}]"
@@ -129,9 +135,8 @@ def _build_sources_block(results: list[RawSearchResult]) -> str:
             header += f"  ({r['url']})"
         if r.get("published_at"):
             header += f"  [{r['published_at']}]"
-        # Truncate each source to avoid prompt explosion.
-        content = r["content"][:_MAX_CHARS_PER_SOURCE]
-        if len(r["content"]) > _MAX_CHARS_PER_SOURCE:
+        content = r["content"][:max_chars]
+        if len(r["content"]) > max_chars:
             content += "\n…[truncated]"
         lines.append(f"{header}\n{content}")
     return "\n\n---\n\n".join(lines)
@@ -188,13 +193,20 @@ async def compressor(
     section_title: str = state.get("section_title", "")
     section_description: str = state.get("section_description", "")
     target_tokens: int = state.get("compression_target_tokens", 5_000)
+    # Use depth-appropriate per-source char limit from state; fall back to
+    # the intermediate default (35 K) if somehow absent.
+    max_chars_per_source: int = min(
+        state.get("max_chars_per_source", 35_000),
+        _ABSOLUTE_MAX_CHARS_PER_SOURCE,
+    )
     raw_results: list[RawSearchResult] = state.get("raw_search_results") or []
     verified_urls: list[VerifiedUrl] = state.get("verified_urls") or []
 
     logger.info(
-        "compressor: %d raw result(s), target=%d tokens (section_id=%s)",
+        "compressor: %d raw result(s), target=%d tokens, max_chars_per_source=%d (section_id=%s)",
         len(raw_results),
         target_tokens,
+        max_chars_per_source,
         section_id,
     )
 
@@ -225,7 +237,7 @@ async def compressor(
         key=lambda r: (_TRUST_TIER.get(r["source_type"], 4), -r["score"]),
     )
 
-    sources_block = _build_sources_block(usable)
+    sources_block = _build_sources_block(usable, max_chars_per_source)
     user_prompt = _USER_TEMPLATE.format(
         section_title=section_title,
         section_description=section_description,
@@ -243,7 +255,15 @@ async def compressor(
         response = await asyncio.wait_for(
             llm.ainvoke(messages, config=config), timeout=settings.llm_timeout_seconds
         )
-        compressed_text: str = response.content.strip()
+        raw_content = response.content
+        compressed_text: str = (
+            raw_content.strip()
+            if isinstance(raw_content, str)
+            else " ".join(
+                part if isinstance(part, str) else part.get("text", "")
+                for part in raw_content
+            ).strip()
+        )
     except asyncio.TimeoutError:
         logger.error(
             "compressor: LLM timed out after %ds (section_id=%s)",
@@ -263,7 +283,7 @@ async def compressor(
             for i, r in enumerate(usable[:5])
         )
 
-    token_estimate = len(compressed_text.split()) * 4 // 3  # rough char→token
+    token_estimate = len(compressed_text) // _CHARS_PER_TOKEN  # rough char→token
     logger.info(
         "compressor: compressed to ~%d tokens (section_id=%s)", token_estimate, section_id
     )

@@ -17,7 +17,7 @@ inside this node.
 
 Model: Gemini 2.5 Pro (reasoning task — quality review)
 
-Loop cap: settings.loops.report_revision_max (default 1 — enforced in graph.py)
+Loop cap: state["report_revision_max"] — depth-dependent (surface=1, inter=2, in-depth=3)
 
 Node contract
 -------------
@@ -44,9 +44,11 @@ from graphs.execution.state import ExecutionState
 
 logger = logging.getLogger(__name__)
 
-# Maximum characters of the report to include in the review prompt.
-# Avoids exceeding context window for very long reports.
-_MAX_REPORT_CHARS = 40_000
+# Absolute safety ceiling for the review prompt.
+# Gemini 2.5 Pro has a 1 M-token input window (≈ 4 M chars).
+# Leave 200 K chars for system prompt + checklist + instructions + output.
+# In practice a large in-depth report is ~200 K chars so this never fires.
+_REVIEW_PROMPT_SAFETY_CHARS = 3_800_000
 
 
 # ---------------------------------------------------------------------------
@@ -145,10 +147,15 @@ async def report_reviewer(
             "status": "writing",
         }
 
-    # Truncate for the review prompt if the report is very long.
-    report_preview = report_html[:_MAX_REPORT_CHARS]
-    if len(report_html) > _MAX_REPORT_CHARS:
-        report_preview += "\n…[report truncated for review]"
+    # Pass the full report to Pro.  The safety ceiling only fires for
+    # pathologically large outputs (> 3.8 M chars, ≈ 950 K tokens).
+    report_preview = report_html[:_REVIEW_PROMPT_SAFETY_CHARS]
+    if len(report_html) > _REVIEW_PROMPT_SAFETY_CHARS:
+        logger.warning(
+            "report_reviewer: report exceeds safety ceiling (%d chars) — "
+            "truncating (job_id=%s)", len(report_html), job_id,
+        )
+        report_preview += "\n…[report truncated — exceeds safety ceiling]"
 
     user_prompt = _USER_TEMPLATE.format(
         topic=topic,
@@ -202,7 +209,10 @@ def should_revise(state: ExecutionState) -> str:
 
     Checks:
       1. Was the verdict "approved" (review_feedback is None)?
-      2. Has the revision cap been reached?
+      2. Has the depth-appropriate revision cap been reached?
+
+    report_revision_max comes from ExecutionState (set by executor from
+    DepthConfig): surface=1, intermediate=2, in-depth=3.
 
     Returns:
       "report_writer" if revision needed and cap not reached.
@@ -210,7 +220,9 @@ def should_revise(state: ExecutionState) -> str:
     """
     review_feedback: str | None = state.get("review_feedback")
     revision_count: int = state.get("revision_count", 0)
-    max_revisions: int = settings.loops.report_revision_max
+    # Read from state — depth-dependent value set at job start.
+    # Fall back to 1 if somehow absent (safe default, never loops forever).
+    max_revisions: int = state.get("report_revision_max", 1)
 
     # Use strict less-than: revision_count is already incremented by the node,
     # so <= max_revisions would allow one extra revision beyond the configured cap.

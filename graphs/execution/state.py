@@ -250,6 +250,7 @@ class SectionResearchState(TypedDict):
     max_search_iterations: int
     max_sources: int
     compression_target_tokens: int  # depth-dependent budget: 2500 / 5000 / 8000
+    max_chars_per_source: int       # per-source input cap for compressor (depth-dependent)
     file_contents: dict[str, str]   # object_id → extracted text (read-only copy)
 
     # ------------------------------------------------------------------
@@ -345,6 +346,8 @@ class ExecutionState(TypedDict):
     # ------------------------------------------------------------------
     max_search_iterations: int
     max_sources_per_section: int
+    max_chars_per_source: int       # per-source input cap passed to compressor via Send()
+    report_revision_max: int        # depth-dependent revision cap: surface=1, inter=2, depth=3
 
     # ------------------------------------------------------------------
     # Reducers  (Annotated with operator.add for parallel section writes)

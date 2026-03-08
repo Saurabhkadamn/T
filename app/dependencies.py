@@ -178,3 +178,14 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> TokenUser:
         roles=roles,
         user_type="internal",
     )
+
+
+# ---------------------------------------------------------------------------
+# Convenience extractors
+# ---------------------------------------------------------------------------
+
+async def get_tenant_id(
+    current_user: TokenUser = Depends(get_current_user),
+) -> str:
+    """Extract tenant_id from the validated token."""
+    return current_user.tenant_id

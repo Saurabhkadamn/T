@@ -54,12 +54,12 @@ return 1
 
 
 async def _check_rate_limit(
-    redis: Redis,
+    redis: Redis | None,
     tenant_id: str,
     user_id: str,
 ) -> None:
     limit = settings.rate_limit_run_per_hour
-    if limit is None:
+    if limit is None or redis is None:
         return
 
     key = f"rate:run:{tenant_id}:{user_id}"
@@ -85,7 +85,7 @@ async def _check_rate_limit(
 async def run(
     body: RunRequest,
     current_user: TokenUser = Depends(get_current_user),
-    redis: Redis = Depends(get_redis),
+    redis: Redis | None = Depends(get_redis),
     mongo: AsyncIOMotorClient = Depends(get_mongo),
 ) -> RunResponse:
     tenant_id = current_user.tenant_id

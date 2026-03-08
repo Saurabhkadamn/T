@@ -25,7 +25,7 @@ Model: Gemini 2.5 Pro (reasoning task — report generation)
   Streaming is handled at the WebSocket/worker layer; this node returns
   the complete HTML string.
 
-Loop cap: settings.loops.report_revision_max (enforced by report_reviewer routing)
+Loop cap: state["report_revision_max"] — depth-dependent (surface=1, inter=2, in-depth=3)
 
 Node contract
 -------------

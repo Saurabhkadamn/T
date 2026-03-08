@@ -38,7 +38,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from langgraph.checkpoint.mongodb import MongoDBSaver
+from langgraph.checkpoint.mongodb.aio import AsyncMongoDBSaver
 from langgraph.graph import END, START, StateGraph
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -111,14 +111,14 @@ def _build_graph() -> StateGraph:
 # Public factory (async — opens MongoDB connection for checkpointer)
 # ---------------------------------------------------------------------------
 
-async def build_execution_graph() -> tuple[Any, MongoDBSaver]:
+async def build_execution_graph() -> tuple[Any, AsyncMongoDBSaver]:
     """Build and compile the execution graph with AsyncMongoDBSaver.
 
     Returns:
         (compiled_graph, checkpointer)
 
     The checkpointer must be kept alive for the duration of the job.
-    Call await checkpointer.aclose() when the worker exits.
+    Close the underlying mongo_client when the worker exits.
 
     Usage::
         graph, checkpointer = await build_execution_graph()
@@ -127,14 +127,15 @@ async def build_execution_graph() -> tuple[Any, MongoDBSaver]:
             async for event in graph.astream(initial_state, config=config):
                 await publish_event(event)
         finally:
-            await checkpointer.aclose()
+            checkpointer.client.close()
     """
     mongo_client = AsyncIOMotorClient(settings.mongo_uri)
-    checkpointer = MongoDBSaver(
+    checkpointer = AsyncMongoDBSaver(
         client=mongo_client,
         db_name=settings.mongo_db_name,
         collection_name="Langgraph_Checkpoints",
     )
+    await checkpointer.setup()  # creates indexes if not present
 
     compiled = _build_graph().compile(checkpointer=checkpointer)
 

@@ -122,6 +122,8 @@ async def run(job_id: str) -> None:
             "tools_enabled": tools_enabled,
             "max_search_iterations": depth_cfg.max_search_iterations,
             "max_sources_per_section": depth_cfg.max_sources_per_section,
+            "max_chars_per_source": depth_cfg.max_chars_per_source,
+            "report_revision_max": depth_cfg.report_revision_max,
             "section_results": [],
             "compressed_findings": [],
             "citations": [],
@@ -343,7 +345,7 @@ async def run(job_id: str) -> None:
                 pass
         if checkpointer is not None:
             try:
-                await checkpointer.aclose()
+                checkpointer.client.close()
             except Exception:
                 pass
         if redis_client is not None:

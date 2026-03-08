@@ -31,18 +31,38 @@ class DepthConfig(BaseModel):
     unique, non-overlapping facts scales with source count.  Forcing all
     depths to the same 3-5K window silently drops valid citations at higher
     depths.  See arch.md §7 for rationale.
+
+    max_chars_per_source controls how many characters of each raw search
+    result are passed to the compressor.  Sized so that N sources × this
+    limit stays well within Flash's 1M-token context window while avoiding
+    unnecessary truncation of valuable content.
+      surface (3 sources):       3 × 25 000 chars ≈  19 K tokens
+      intermediate (5 sources):  5 × 35 000 chars ≈  44 K tokens
+      in-depth (10 sources):    10 × 50 000 chars ≈ 125 K tokens
+
+    report_revision_max is the maximum number of writer→reviewer revision
+    loops allowed.  Scaled with depth:
+      surface:       1  (quick turnaround)
+      intermediate:  2
+      in-depth:      3  (thorough quality gate)
     """
 
     max_search_iterations: int
     max_sources_per_section: int
     compression_target_tokens: int
     supervisor_reflection_enabled: bool
+    max_chars_per_source: int
+    report_revision_max: int
 
 
 class LoopLimits(BaseModel):
     """Hard caps on every feedback / revision loop in both graphs.
 
     These are enforced inside graph routing functions — not in node logic.
+
+    Note: report_revision_max is NOT here — it is depth-dependent and lives
+    in DepthConfig.  It is passed through ExecutionState so that should_revise
+    can read it without importing settings.
     """
 
     clarification_max: int = 3
@@ -50,7 +70,6 @@ class LoopLimits(BaseModel):
     plan_revision_max: int = 3          # max user plan rejections before forcing restart
     plan_self_review_max: int = 2
     supervisor_reflection_max: int = 2
-    report_revision_max: int = 1
 
 
 class ModelConfig(BaseModel):
@@ -200,18 +219,24 @@ class Settings(BaseSettings):
         max_sources_per_section=3,
         compression_target_tokens=2_500,
         supervisor_reflection_enabled=False,
+        max_chars_per_source=25_000,    # 3 sources × 25 K chars ≈ 19 K tokens input to Flash
+        report_revision_max=1,
     )
     depth_intermediate: DepthConfig = DepthConfig(
         max_search_iterations=2,
         max_sources_per_section=5,
         compression_target_tokens=5_000,
         supervisor_reflection_enabled=False,
+        max_chars_per_source=35_000,    # 5 sources × 35 K chars ≈ 44 K tokens input to Flash
+        report_revision_max=2,
     )
     depth_in_depth: DepthConfig = DepthConfig(
         max_search_iterations=3,
         max_sources_per_section=10,
         compression_target_tokens=8_000,
         supervisor_reflection_enabled=True,
+        max_chars_per_source=50_000,    # 10 sources × 50 K chars ≈ 125 K tokens input to Flash
+        report_revision_max=3,
     )
 
     # ------------------------------------------------------------------
