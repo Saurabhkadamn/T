@@ -62,12 +62,28 @@ def _route_entry(state: PlanningState) -> str:
 
     Mode 1 — no context_brief yet (fresh request)   → context_builder
     Mode 2 — brief exists, no plan yet               → query_analyzer
-    Mode 3 — brief + plan present (plan revision)    → plan_creator
+    Mode 3 — brief + plan + feedback present         → plan_creator (revision)
     """
     if not state.get("context_brief"):
         return "context_builder"
     if state.get("plan") is None:
         return "query_analyzer"
+
+    # Mode 3: plan revision — require both plan_feedback and revision cap not reached.
+    if state.get("plan_revision_count", 0) >= settings.loops.plan_revision_max:
+        logger.info(
+            "route: plan_revision_max reached (%d/%d) → END (surface current plan)",
+            state.get("plan_revision_count", 0),
+            settings.loops.plan_revision_max,
+        )
+        return END
+
+    if state.get("plan_feedback") is None:
+        logger.warning(
+            "route: Mode 3 entered without plan_feedback set → END (nothing to revise)"
+        )
+        return END
+
     return "plan_creator"
 
 
@@ -134,6 +150,7 @@ def _build_planning_graph() -> Any:
             "context_builder": "context_builder",
             "query_analyzer": "query_analyzer",
             "plan_creator": "plan_creator",
+            END: END,
         },
     )
 

@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from itertools import zip_longest
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -122,7 +123,8 @@ def _format_clarification(questions: list[str], answers: list[str]) -> str:
     if not answers:
         return "(none)"
     return "\n".join(
-        f"Q: {q}\nA: {a}" for q, a in zip(questions, answers)
+        f"Q: {q}\nA: {a}"
+        for q, a in zip_longest(questions, answers, fillvalue="(not answered)")
     )
 
 

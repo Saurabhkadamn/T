@@ -21,7 +21,7 @@ Loop cap: settings.loops.report_revision_max (default 1 — enforced in graph.py
 
 Node contract
 -------------
-Input  fields consumed: report_html, checklist, topic, revised_topic,
+Input  fields consumed: report_html, checklist, topic, refined_topic,
                         revision_count
 Output fields written:  review_feedback (str or None), revision_count (+1),
                         status="exporting" or "writing"

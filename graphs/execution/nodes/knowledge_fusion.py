@@ -43,6 +43,7 @@ from graphs.execution.state import (
     Citation,
     CompressedFinding,
     ExecutionState,
+    SourceScore,
     SourceType,
 )
 
@@ -142,8 +143,9 @@ def _format_knowledge_gaps(gaps: list[str]) -> str:
 def _format_findings(
     findings: list[CompressedFinding],
     citations: list[Citation],
+    source_scores: list[SourceScore] | None = None,
 ) -> str:
-    """Format compressed findings with their trust tiers and citation context."""
+    """Format compressed findings with trust tiers, citation context, and source scores."""
     if not findings:
         return "(no findings available)"
 
@@ -151,6 +153,14 @@ def _format_findings(
     cites_by_section: dict[str, list[Citation]] = {}
     for c in citations:
         cites_by_section.setdefault(c["section_id"], []).append(c)
+
+    # Build a source score index per section — top 3 by composite score.
+    scores_by_section: dict[str, list[SourceScore]] = {}
+    for s in (source_scores or []):
+        scores_by_section.setdefault(s["section_id"], []).append(s)
+    # Pre-sort each section's scores descending by composite.
+    for sid in scores_by_section:
+        scores_by_section[sid].sort(key=lambda x: x.get("composite_score", 0.0), reverse=True)
 
     # Sort findings so higher-trust sources appear first within each section.
     def _min_trust(f: CompressedFinding) -> int:
@@ -164,6 +174,7 @@ def _format_findings(
 
     blocks: list[str] = []
     for f in sorted_findings:
+        section_id = f["section_id"]
         types_used = f.get("source_types_used", [])
         trust_labels = ", ".join(
             _TRUST_LABELS.get(t, t) for t in sorted(types_used, key=lambda x: _TRUST_TIER.get(x, 4))
@@ -171,17 +182,30 @@ def _format_findings(
         header = f"### {f['section_title']}  (sources: {trust_labels})"
         content = f["compressed_text"]
 
+        # Append top source scores (relevance/recency/authenticity context).
+        top_scores = scores_by_section.get(section_id, [])[:3]
+        scores_str = ""
+        if top_scores:
+            score_lines = [
+                f"  {s.get('url', '(unknown)')} — composite={s.get('composite_score', 0):.2f}"
+                f" (rel={s.get('relevance_score', 0):.2f},"
+                f" rec={s.get('recency_score', 0):.2f},"
+                f" auth={s.get('authenticity_score', 0):.2f})"
+                for s in top_scores
+            ]
+            scores_str = "\nTop sources by relevance:\n" + "\n".join(score_lines)
+
         # Append a brief citation summary.
-        sec_cites = cites_by_section.get(f["section_id"], [])
+        sec_cites = cites_by_section.get(section_id, [])
         if sec_cites:
             cite_lines = [
                 f"  [{c['trust_tier']}] {c['title'] or c['url'] or '(unnamed)'}"
                 for c in sorted(sec_cites, key=lambda x: x["trust_tier"])[:5]
             ]
             cites_str = "Key sources:\n" + "\n".join(cite_lines)
-            blocks.append(f"{header}\n{content}\n\n{cites_str}")
+            blocks.append(f"{header}\n{content}{scores_str}\n\n{cites_str}")
         else:
-            blocks.append(f"{header}\n{content}")
+            blocks.append(f"{header}\n{content}{scores_str}")
 
     return "\n\n---\n\n".join(blocks)
 
@@ -206,6 +230,7 @@ async def knowledge_fusion(
     knowledge_gaps: list[str] = state.get("knowledge_gaps") or []
     compressed_findings: list[CompressedFinding] = state.get("compressed_findings") or []
     citations: list[Citation] = state.get("citations") or []
+    source_scores: list[SourceScore] = state.get("source_scores") or []
 
     logger.info(
         "knowledge_fusion: synthesising %d section finding(s) (job_id=%s)",
@@ -228,7 +253,7 @@ async def knowledge_fusion(
         sections_overview=_format_sections_overview(sections),
         checklist=_format_checklist(checklist),
         knowledge_gaps=_format_knowledge_gaps(knowledge_gaps),
-        findings_block=_format_findings(compressed_findings, citations),
+        findings_block=_format_findings(compressed_findings, citations, source_scores),
     )
 
     llm = get_llm("knowledge_fusion", 0.3)

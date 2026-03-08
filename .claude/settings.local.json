@@ -8,7 +8,8 @@
       "Bash(set GEMINI_API_KEY=:*)",
       "Bash(curl:*)",
       "WebSearch",
-      "WebFetch(domain:langfuse.com)"
+      "WebFetch(domain:langfuse.com)",
+      "Bash(git:*)"
     ]
   }
 }

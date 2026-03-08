@@ -36,6 +36,7 @@ import asyncio
 import json
 import logging
 import uuid
+from itertools import zip_longest
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -89,7 +90,7 @@ Guidelines:
 - in-depth (7-10 sections): comprehensive coverage with subsections possible
 
 Each section must have a distinct research focus with minimal overlap.
-The search_strategy field must be a comma-separated list from: {source_scope_str}
+The search_strategy field must be a comma-separated list from: {source_scope}
 
 Also produce a checklist of 3-5 quality standards the research execution must meet
 (e.g. "Each section must cite at least 2 unique sources",
@@ -173,7 +174,10 @@ _DEPTH_GUIDANCE = {
 def _format_clarifications(questions: list[str], answers: list[str]) -> str:
     if not answers:
         return "(none)"
-    return "\n".join(f"Q: {q}\nA: {a}" for q, a in zip(questions, answers))
+    return "\n".join(
+        f"Q: {q}\nA: {a}"
+        for q, a in zip_longest(questions, answers, fillvalue="(not answered)")
+    )
 
 
 def _parse_plan_response(raw: str) -> tuple[ResearchPlan, list[str]]:
@@ -240,7 +244,6 @@ async def plan_creator(
             max_sources=max_sources,
             recency_scope=state.get("recency_scope", "last_2_years"),
             source_scope=", ".join(source_scope),
-            source_scope_str=", ".join(source_scope),
             assumptions_text="\n".join(
                 f"- {a}" for a in (state.get("assumptions") or [])
             ) or "(none)",

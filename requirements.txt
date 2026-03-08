@@ -30,6 +30,8 @@ httpx>=0.26.0                         # Tavily / Serper / source_verifier
 
 # ── Search tools ───────────────────────────────────────────────────────────
 arxiv>=2.1.0                          # Arxiv SDK
+langchain-community>=0.2.0            # ArxivLoader (full paper PDF extraction)
+pymupdf>=1.24.0                       # PDF backend for ArxivLoader
 
 # ── AWS ────────────────────────────────────────────────────────────────────
 boto3>=1.34.0                         # S3 put + presigned URLs
