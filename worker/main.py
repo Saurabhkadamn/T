@@ -22,6 +22,7 @@ import sys
 
 logging.basicConfig(
     level=logging.INFO,
+    # otelTraceID / otelSpanID injected by LoggingInstrumentor when OTEL is enabled
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
 )
 
@@ -33,6 +34,13 @@ async def _main() -> None:
     if not job_id:
         logger.error("EKS_JOB_ID environment variable is not set or empty")
         sys.exit(1)
+
+    # Initialise OTEL before any graph work starts so the tracer provider is
+    # set before get_tracer() / @node_span calls inside executor/nodes.
+    # Set OTEL_SERVICE_NAME=kadal-deepresearch-worker in the EKS Job env to
+    # distinguish worker spans from API spans in the collector.
+    from app.tracing import init_otel
+    init_otel()
 
     logger.info("worker: starting job_id=%s", job_id)
 

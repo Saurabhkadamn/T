@@ -10,7 +10,9 @@
       "WebSearch",
       "WebFetch(domain:langfuse.com)",
       "Bash(git:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

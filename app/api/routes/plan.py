@@ -395,7 +395,7 @@ async def plan(
     # ── Run planning graph ─────────────────────────────────────────────────
     # Capture carrier before the graph runs so Langfuse trace links to the request span
     _pre_graph_carrier = inject_trace_carrier()
-    lf_handler = get_callback_handler(
+    lf_handler, lf_meta = get_callback_handler(
         trace_name=f"plan:{job_id}",
         user_id=user_id,
         session_id=job_id,
@@ -412,6 +412,8 @@ async def plan(
             "thread_id": job_id,
             "redis_client": redis,
         },
+        "run_name": f"plan:{job_id}",
+        "metadata": lf_meta,
     }
     if lf_handler:
         graph_config["callbacks"] = [lf_handler]

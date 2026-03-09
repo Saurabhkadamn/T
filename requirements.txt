@@ -1,54 +1,54 @@
 # Kadal AI — Deep Research Microservice
 # Python 3.11+
+# Pinned for reproducible production builds. Update via: pip install -r requirements.in && pip freeze
 
 # ── Web framework ──────────────────────────────────────────────────────────
-fastapi>=0.110.0
-uvicorn[standard]>=0.27.0
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
 
 # ── Pydantic / settings ────────────────────────────────────────────────────
-pydantic>=2.6.0
-pydantic-settings>=2.2.0
+pydantic==2.10.6
+pydantic-settings==2.8.1
 
 # ── LangGraph / LangChain ──────────────────────────────────────────────────
-langgraph>=0.2.0
-langgraph-checkpoint-mongodb>=0.1.0   # AsyncMongoDBSaver
-langchain>=0.2.0
-langchain-core>=0.2.0
-langchain-google-genai>=1.0.0         # Gemini 2.5 Pro / Flash  (LLM_PROVIDER=google)
-langchain-openai>=0.1.0               # GPT-4o / GPT-4o-mini     (LLM_PROVIDER=openai)
-langchain-anthropic>=0.1.0            # Claude Opus / Haiku       (LLM_PROVIDER=anthropic)
+langgraph==1.0.10
+langgraph-checkpoint-mongodb==0.3.1
+langchain-mongodb==0.3.2          # explicit: transitive dep of langgraph-checkpoint-mongodb
+langchain==0.3.21
+langchain-core==0.3.47
+langchain-google-genai==1.0.10    # intentionally 1.x — avoids google-genai SDK 4.x rewrite
+langchain-openai==0.2.14          # intentionally 0.2.x — stays on openai v1 SDK
+langchain-anthropic==0.2.4        # intentionally 0.2.x
+langchain-community==0.3.21       # matches langchain==0.3.21
 
 # ── MongoDB ────────────────────────────────────────────────────────────────
-motor>=3.3.0                          # async MongoDB driver
-pymongo>=4.6.0                        # sync driver + IndexModel
+motor==3.7.1
+pymongo==4.15.0                   # pinned: motor needs <5.0, checkpoint-mongodb needs <4.16
 
 # ── Redis ──────────────────────────────────────────────────────────────────
-redis>=5.0.0                          # redis-py with asyncio support
+redis==5.2.1
 
 # ── HTTP ───────────────────────────────────────────────────────────────────
-httpx>=0.26.0                         # Tavily / Serper / source_verifier
+httpx==0.28.1
 
 # ── Search tools ───────────────────────────────────────────────────────────
-arxiv>=2.1.0                          # Arxiv SDK
-langchain-community>=0.2.0            # ArxivLoader (full paper PDF extraction)
-pymupdf>=1.24.0                       # PDF backend for ArxivLoader
+arxiv==2.2.0
+pymupdf==1.25.3
 
 # ── AWS ────────────────────────────────────────────────────────────────────
-boto3>=1.34.0                         # S3 put + presigned URLs
+boto3==1.37.26
 
 # ── Environment ────────────────────────────────────────────────────────────
-python-dotenv>=1.0.0                  # load .env in local dev
+python-dotenv==1.1.0
 
 # ── Observability ────────────────────────────────────────────────────────────
-langfuse>=2.0.0                       # self-hosted Langfuse tracing
-opentelemetry-sdk>=1.24.0
-opentelemetry-exporter-otlp-proto-grpc>=1.24.0
-opentelemetry-instrumentation-fastapi>=0.45b0
-opentelemetry-instrumentation-httpx>=0.45b0
-opentelemetry-instrumentation-pymongo>=0.45b0
-opentelemetry-instrumentation-redis>=0.45b0
-opentelemetry-instrumentation-logging>=0.45b0
-
-# ── Testing ─────────────────────────────────────────────────────────────────
-pytest>=8.0.0
-pytest-asyncio>=0.23.0
+langfuse==3.14.5
+grpcio==1.71.0
+opentelemetry-api==1.40.0
+opentelemetry-sdk==1.40.0
+opentelemetry-exporter-otlp-proto-grpc==1.40.0
+opentelemetry-instrumentation-fastapi==0.61b0
+opentelemetry-instrumentation-httpx==0.61b0
+opentelemetry-instrumentation-pymongo==0.61b0
+opentelemetry-instrumentation-redis==0.61b0
+opentelemetry-instrumentation-logging==0.61b0

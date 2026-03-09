@@ -19,15 +19,16 @@ Usage::
 
     # Per graph run:
     from app.tracing import get_callback_handler
-    handler = get_callback_handler(
+    lf_handler, lf_meta = get_callback_handler(
         trace_name="plan:abc123",
         user_id="user1",
         session_id="abc123",
         metadata={"tenant_id": "t1"},
         tags=["planning"],
     )
-    if handler:
-        config["callbacks"] = [handler]
+    config = {"configurable": {...}, "run_name": "plan:abc123", "metadata": lf_meta}
+    if lf_handler:
+        config["callbacks"] = [lf_handler]
 
     # Cross-service propagation:
     from app.tracing import inject_trace_carrier, extract_trace_context, get_tracer
@@ -104,11 +105,22 @@ def get_callback_handler(
     session_id: str | None = None,
     metadata: dict | None = None,
     tags: list[str] | None = None,
-) -> Any:
-    """Return a pre-configured ``CallbackHandler`` for a single graph run.
+) -> tuple[Any, dict]:
+    """Return ``(CallbackHandler | None, langfuse_metadata_dict)`` for a single graph run.
 
-    Returns ``None`` when Langfuse is disabled or unavailable so callers can
-    use a simple ``if handler:`` guard without changing graph invocation logic.
+    In Langfuse v3, ``CallbackHandler()`` takes no constructor args.  Trace
+    attributes (user_id, session_id, tags) are passed via the LangChain
+    ``config["metadata"]`` dict using the ``langfuse_*`` key convention.
+
+    Usage::
+        lf_handler, lf_meta = get_callback_handler(trace_name="plan:abc", ...)
+        config = {
+            "configurable": {...},
+            "run_name": "plan:abc",   # becomes the Langfuse trace name
+            "metadata": lf_meta,
+        }
+        if lf_handler:
+            config["callbacks"] = [lf_handler]
 
     Args:
         trace_name: Human-readable trace name shown in the Langfuse UI.
@@ -116,28 +128,33 @@ def get_callback_handler(
         user_id:    Langfuse user identifier (for per-user analytics).
         session_id: Langfuse session identifier — use ``job_id`` so all spans
                     for a job group under a single session.
-        metadata:   Free-form key/value pairs attached to the trace root.
+        metadata:   Free-form key/value pairs merged into the returned dict.
         tags:       List of tag strings (e.g. ``["planning", "tenant_abc"]``).
 
     Returns:
-        ``langfuse.langchain.CallbackHandler`` or ``None``.
+        Tuple of (``CallbackHandler`` or ``None``, metadata dict to pass into
+        ``config["metadata"]``).
     """
+    lf_meta: dict = {}
+    if user_id:
+        lf_meta["langfuse_user_id"] = user_id
+    if session_id:
+        lf_meta["langfuse_session_id"] = session_id
+    if tags:
+        lf_meta["langfuse_tags"] = tags
+    if metadata:
+        lf_meta.update(metadata)
+
     if _langfuse is None:
-        return None
+        return None, lf_meta
 
     try:
         from langfuse.langchain import CallbackHandler  # type: ignore[import]
 
-        return CallbackHandler(
-            trace_name=trace_name,
-            user_id=user_id,
-            session_id=session_id,
-            metadata=metadata or {},
-            tags=tags or [],
-        )
+        return CallbackHandler(), lf_meta
     except Exception as exc:
         logger.warning("tracing: could not create CallbackHandler — %s", exc)
-        return None
+        return None, lf_meta
 
 
 # ---------------------------------------------------------------------------

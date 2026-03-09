@@ -55,7 +55,8 @@ async def run(job_id: str) -> None:
     mongo_client: AsyncIOMotorClient | None = None
     redis_client: aioredis.Redis | None = None
     checkpointer = None
-    _exec_span = None   # OTEL execution span — opened after job_doc is loaded
+    _exec_span_cm = None  # OTEL span context manager — entered after job_doc is loaded
+    _exec_span = None     # actual Span object (return value of _exec_span_cm.__enter__())
     tenant_id: str = ""  # captured early so error handler can use it
     job_doc: dict | None = None  # captured early so error handler can update rate-limit hash
 
@@ -143,8 +144,11 @@ async def run(job_id: str) -> None:
 
         # ── Open OTEL child span for the full execution ────────────────────
         # Becomes a child of the /run request span — same trace_id.
+        # start_as_current_span() is a @contextmanager — returns a CM object,
+        # not a span.  __enter__() returns the actual Span (and sets it current).
+        # We keep both: _exec_span_cm for __exit__, _exec_span for get_span_context().
         _tracer = get_tracer("kadal.worker")
-        _exec_span = _tracer.start_as_current_span(
+        _exec_span_cm = _tracer.start_as_current_span(
             "execution",
             context=_parent_ctx,
             attributes={
@@ -153,7 +157,7 @@ async def run(job_id: str) -> None:
                 "report_id": initial_state["report_id"],
             },
         )
-        _exec_span.__enter__()
+        _exec_span = _exec_span_cm.__enter__()
 
         # Derive real OTEL trace_id from the active span
         def _format_trace_id(span) -> str:
@@ -194,7 +198,7 @@ async def run(job_id: str) -> None:
         # ── 4. Build execution graph ───────────────────────────────────────
         graph, checkpointer = await build_execution_graph()
 
-        lf_handler = get_callback_handler(
+        lf_handler, lf_meta = get_callback_handler(
             trace_name=f"execution:{job_id}",
             user_id=initial_state["user_id"],
             session_id=job_id,
@@ -208,7 +212,11 @@ async def run(job_id: str) -> None:
             tags=["execution", initial_state["tenant_id"]],
         )
 
-        config: dict = {"configurable": {"thread_id": job_id}}
+        config: dict = {
+            "configurable": {"thread_id": job_id},
+            "run_name": f"execution:{job_id}",
+            "metadata": lf_meta,
+        }
         if lf_handler:
             config["callbacks"] = [lf_handler]
 
@@ -337,10 +345,10 @@ async def run(job_id: str) -> None:
                     logger.warning("executor: could not update rate-limit hash on failure — %s", _exc)
 
     finally:
-        # Close OTEL execution span (None-safe — may not have been opened on early errors)
-        if _exec_span is not None:
+        # Close OTEL execution span via the context manager (None-safe)
+        if _exec_span_cm is not None:
             try:
-                _exec_span.__exit__(None, None, None)
+                _exec_span_cm.__exit__(None, None, None)
             except Exception:
                 pass
         if checkpointer is not None:
