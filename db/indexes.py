@@ -23,10 +23,6 @@ deep_research_reports (new):
   - {report_id: 1}                            UNIQUE
   - {tenant_id: 1, user_id: 1, executed_at: -1}
 
-source_scores (new):
-  - {url_hash: 1, tenant_id: 1}              UNIQUE (compound)
-  - {domain: 1}
-
 langgraph_checkpoints (new):
   - Managed by AsyncMongoDBSaver — do not add custom indexes here.
     The saver handles its own index creation on first use.
@@ -78,16 +74,6 @@ _DEEP_RESEARCH_REPORTS_INDEXES = [
     ),
 ]
 
-_SOURCE_SCORES_INDEXES = [
-    IndexModel(
-        [("url_hash", ASCENDING), ("tenant_id", ASCENDING)],
-        unique=True,
-        name="url_hash_tenant_unique",
-    ),
-    IndexModel([("domain", ASCENDING)], name="domain"),
-]
-
-
 # ---------------------------------------------------------------------------
 # Setup function
 # ---------------------------------------------------------------------------
@@ -111,7 +97,6 @@ async def setup_all_indexes(mongo_uri: str | None = None) -> None:
         _apply_indexes(db, "Background_Jobs", _BACKGROUND_JOBS_INDEXES),
         _apply_indexes(db, "Deep_Research_Jobs", _DEEP_RESEARCH_JOBS_INDEXES),
         _apply_indexes(db, "Deep_Research_Reports", _DEEP_RESEARCH_REPORTS_INDEXES),
-        _apply_indexes(db, "Source_Scores", _SOURCE_SCORES_INDEXES),
         # Langgraph_Checkpoints: AsyncMongoDBSaver manages its own indexes.
         _ensure_collection_exists(db, "Langgraph_Checkpoints"),
     ]
@@ -122,7 +107,6 @@ async def setup_all_indexes(mongo_uri: str | None = None) -> None:
             "Background_Jobs",
             "Deep_Research_Jobs",
             "Deep_Research_Reports",
-            "Source_Scores",
             "Langgraph_Checkpoints",
         ],
         results,

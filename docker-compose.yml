@@ -38,5 +38,18 @@ services:
       retries: 3
       start_period: 20s
 
+  worker:
+    profiles: ["worker"]
+    build: .
+    container_name: kadal_worker
+    env_file: .env
+    environment:
+      - REDIS_HOST=redis
+      - EKS_JOB_ID=${EKS_JOB_ID:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: python -m worker.main
+
 volumes:
   redis_data:

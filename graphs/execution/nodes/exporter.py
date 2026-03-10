@@ -14,13 +14,10 @@ Operations (in order):
      Saves citations (trimmed), summary (extracted from HTML), citation_count.
      Every query MUST include tenant_id — no exceptions.
 
-  3. Bulk-upsert SourceScore records into the source_scores collection.
-     Enriches each record with times_used increment and scores_history.
-
-  4. Update the deep_research_jobs document status to "completed"
+  3. Update the deep_research_jobs document status to "completed"
      (sets completed_at).
 
-  5. Publish final status to Redis (job:{job_id}:status hash).
+  4. Publish final status to Redis (job:{job_id}:status hash).
 
 On any S3 or MongoDB failure:
   - Log the error.
@@ -33,7 +30,7 @@ S3 presigned URL TTL: 3600 seconds (1 hour)
 Node contract
 -------------
 Input  fields consumed: report_html, s3_key (if already set), tenant_id,
-                        user_id, job_id, report_id, citations, source_scores,
+                        user_id, job_id, report_id, citations,
                         plan, topic, refined_topic
 Output fields written:  s3_key, status, error (on failure)
 """
@@ -55,12 +52,11 @@ from langchain_core.runnables import RunnableConfig
 
 from app.config import settings
 from app.tracing import node_span
-from graphs.execution.state import Citation, ExecutionState, SourceScore
+from graphs.execution.state import Citation, ExecutionState
 
 logger = logging.getLogger(__name__)
 
 _S3_KEY_TEMPLATE = "deep-research/{tenant_id}/{user_id}/{report_id}.html"
-_SCORES_HISTORY_CAP = 20    # max entries in source_scores.scores_history
 
 
 # ---------------------------------------------------------------------------
@@ -213,59 +209,6 @@ async def _upsert_report(
     )
 
 
-async def _bulk_upsert_source_scores(
-    mongo_client: AsyncIOMotorClient,
-    scores: list[SourceScore],
-    job_id: str,
-    now_iso: str,
-) -> None:
-    """Bulk-upsert source_scores.  Every document includes tenant_id.
-
-    Increments times_used, appends to scores_history (capped at 20 entries).
-    """
-    if not scores:
-        return
-    db = mongo_client[settings.mongo_db_name]
-    coll = db["Source_Scores"]
-
-    from pymongo import UpdateOne
-    ops = [
-        UpdateOne(
-            # Compound key: url_hash + tenant_id (non-negotiable).
-            {"url_hash": s["url_hash"], "tenant_id": s["tenant_id"]},
-            {
-                "$set": {
-                    "url": s.get("url", ""),
-                    "domain": s.get("domain", ""),
-                    "tenant_id": s["tenant_id"],
-                    "url_hash": s["url_hash"],
-                    "authenticity_score": s.get("authenticity_score", 0.0),
-                    "was_url_authentic": s.get("authenticity_score", 0.0) >= 0.5,
-                    "recency": s.get("recency", ""),
-                    "relevant_topics": s.get("relevant_topics", []),
-                    "last_scored_at": now_iso,
-                },
-                "$inc": {"times_used": 1},
-                "$push": {
-                    "scores_history": {
-                        "$each": [
-                            {
-                                "job_id": job_id,
-                                "score": s.get("authenticity_score", 0.0),
-                                "scored_at": now_iso,
-                            }
-                        ],
-                        "$slice": -_SCORES_HISTORY_CAP,
-                    }
-                },
-            },
-            upsert=True,
-        )
-        for s in scores
-    ]
-    await coll.bulk_write(ops, ordered=False)
-
-
 async def _update_job_status(
     mongo_client: AsyncIOMotorClient,
     job_id: str,
@@ -341,7 +284,6 @@ async def exporter(
     tenant_id: str = state.get("tenant_id", "")
     user_id: str = state.get("user_id", "")
     report_html: str | None = state.get("report_html")
-    source_scores: list[SourceScore] = state.get("source_scores") or []
 
     now_iso = datetime.now(tz=timezone.utc).isoformat()
     errors: list[str] = []
@@ -364,19 +306,12 @@ async def exporter(
         errors.append("report_html is None — nothing to upload")
 
     # ------------------------------------------------------------------
-    # 2 & 3 & 4. MongoDB writes
+    # 2 & 3. MongoDB writes
     # ------------------------------------------------------------------
     mongo_client = _get_mongo_client()
     try:
         await _upsert_report(mongo_client, state, final_s3_key, now_iso)
         logger.info("exporter: deep_research_reports upserted (job_id=%s)", job_id)
-
-        await _bulk_upsert_source_scores(mongo_client, source_scores, job_id, now_iso)
-        logger.info(
-            "exporter: %d source_score(s) upserted (job_id=%s)",
-            len(source_scores),
-            job_id,
-        )
 
         final_status = "completed" if not errors else "partial_success"
         await _update_job_status(
