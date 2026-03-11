@@ -191,6 +191,7 @@ class Settings(BaseSettings):
     otel_service_name: str = "kadal-deepresearch-api"   # override for worker: OTEL_SERVICE_NAME=kadal-deepresearch-worker
     otel_service_version: str = "1.0.0"
     otel_sample_rate: float = 1.0                        # 1.0 = 100%; lower in prod
+    otel_insecure: bool = True                           # True for in-cluster sidecars; False for external collectors with TLS
     tavily_api_key: str
     serper_api_key: str
     content_lake_url: str = ""          # optional — only used when tools.content_lake=true

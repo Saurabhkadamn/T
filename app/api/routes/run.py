@@ -2,7 +2,7 @@
 app/api/routes/run.py — POST /api/deepresearch/run
 
 Loads the approved plan from deep_research_jobs, creates the report record,
-queues a background_jobs entry, and returns job_id + report_id to the client.
+and returns job_id + report_id to the client.
 The actual execution graph runs in the EKS Worker (worker/executor.py).
 
 Flow
@@ -10,13 +10,12 @@ Flow
 1. Validate tenant_id.
 2. Rate-limit check — Redis counter: rate:run:{tenant_id}:{user_id}
 3. Load deep_research_jobs by {job_id, tenant_id} — 404 if missing.
-4. Validate status == "plans_ready" — 400 otherwise.
+4. Validate status == PLAN_READY — 400 otherwise.
 5. Generate report_id = uuid4().
-6. UPDATE deep_research_jobs {status: research_queued, report_id, updated_at}.
-7. INSERT deep_research_reports document (status=research_queued).
-8. INSERT background_jobs document (type=DEEP_RESEARCH, ref_id=job_id) — non-fatal.
-9. Set Redis hash job:{job_id}:status.
-10. Return RunResponse(job_id, report_id, status="research_queued").
+6. UPDATE deep_research_jobs {status: QUEUED, report_id, updated_at}.
+7. INSERT deep_research_reports document (status=QUEUED).
+8. Set Redis hash job:{job_id}:status.
+9. Return RunResponse(job_id, report_id, status="QUEUED").
 """
 
 from __future__ import annotations
@@ -29,9 +28,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from motor.motor_asyncio import AsyncIOMotorClient
 from redis.asyncio import Redis
 
+from bson import ObjectId
+
 from app.api.models import RunRequest, RunResponse
 from app.config import settings
 from app.dependencies import TokenUser, get_current_user, get_mongo, get_redis
+from app.enums import ExecutionJobStatus, PlanningJobStatus
 from app.tracing import inject_trace_carrier
 
 logger = logging.getLogger(__name__)
@@ -99,7 +101,7 @@ async def run(
     # ── Load plan from deep_research_jobs ─────────────────────────────────
     try:
         job_doc = await db["Deep_Research_Jobs"].find_one(
-            {"job_id": body.job_id, "tenant_id": tenant_id}
+            {"_id": ObjectId(body.job_id), "tenant_id": tenant_id}
         )
     except Exception as exc:
         logger.exception("run: MongoDB find_one failed for job_id=%s", body.job_id)
@@ -118,8 +120,8 @@ async def run(
     if body.action == "cancel":
         try:
             await db["Deep_Research_Jobs"].update_one(
-                {"job_id": body.job_id, "tenant_id": tenant_id},
-                {"$set": {"status": "cancelled", "updated_at": datetime.now(timezone.utc).isoformat()}},
+                {"_id": ObjectId(body.job_id), "tenant_id": tenant_id},
+                {"$set": {"status": PlanningJobStatus.PLAN_CANCELED, "updated_at": datetime.now(timezone.utc).isoformat()}},
             )
         except Exception as exc:
             logger.exception("run: failed to cancel job_id=%s", body.job_id)
@@ -128,13 +130,13 @@ async def run(
                 detail=f"Failed to cancel job: {exc}",
             ) from exc
         logger.info("run: cancelled job_id=%s tenant_id=%s", body.job_id, tenant_id)
-        return RunResponse(job_id=body.job_id, status="cancelled")
+        return RunResponse(job_id=body.job_id, status=PlanningJobStatus.PLAN_CANCELED)
 
-    if job_doc.get("status") != "plans_ready":
+    if job_doc.get("status") != PlanningJobStatus.PLAN_READY:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Job {body.job_id!r} is not in plans_ready state "
+                f"Job {body.job_id!r} is not in PLAN_READY state "
                 f"(current: {job_doc.get('status')!r})"
             ),
         )
@@ -149,9 +151,9 @@ async def run(
     # ── Update deep_research_jobs ──────────────────────────────────────────
     try:
         await db["Deep_Research_Jobs"].update_one(
-            {"job_id": body.job_id, "tenant_id": tenant_id},
+            {"_id": ObjectId(body.job_id), "tenant_id": tenant_id},
             {"$set": {
-                "status": "research_queued",
+                "status": ExecutionJobStatus.QUEUED,
                 "report_id": report_id,
                 "updated_at": now_iso,
                 "metadata.otel_carrier": otel_carrier,
@@ -169,7 +171,7 @@ async def run(
     plan: dict = job_doc.get("plan") or {}
     report_doc = {
         "report_id": report_id,
-        "job_id": body.job_id,
+        "job_id": ObjectId(body.job_id),
         "tenant_id": tenant_id,
         "user_id": user_id,
         "topic": job_doc.get("topic", ""),
@@ -183,7 +185,7 @@ async def run(
         "citation_count": 0,
         "summary": None,
         "citations": [],
-        "status": "research_queued",
+        "status": ExecutionJobStatus.QUEUED,
         "s3_key": None,
         "executed_at": None,
         "created_at": now_iso,
@@ -194,32 +196,13 @@ async def run(
         logger.exception("run: failed to insert deep_research_reports")
         # Best-effort rollback of job status update
         await db["Deep_Research_Jobs"].update_one(
-            {"job_id": body.job_id, "tenant_id": tenant_id},
-            {"$set": {"status": "plans_ready", "report_id": None, "updated_at": now_iso}},
+            {"_id": ObjectId(body.job_id), "tenant_id": tenant_id},
+            {"$set": {"status": PlanningJobStatus.PLAN_READY, "report_id": None, "updated_at": now_iso}},
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create report record: {exc}",
         ) from exc
-
-    # ── Insert Background_Jobs ─────────────────────────────────────────────
-    bg_doc = {
-        "job_id": body.job_id,
-        "job_type": "DEEP_RESEARCH",
-        "tenant_id": tenant_id,
-        "source_path": "",
-        "call_back_url": None,
-        "job_submitted_date": now_iso,
-        "job_status": "QUEUED",
-        "error": None,
-        "job_completed_date": None,
-    }
-    try:
-        await db["Background_Jobs"].insert_one(bg_doc)
-    except Exception as exc:
-        # Non-fatal — job/report documents exist; the platform scheduler can
-        # still pick up the job from deep_research_jobs directly.
-        logger.error("run: failed to insert background_jobs — %s", exc)
 
     # ── Set Redis status hash ──────────────────────────────────────────────
     redis_key = f"job:{body.job_id}:status"
@@ -228,7 +211,7 @@ async def run(
         await redis.hset(
             redis_key,
             mapping={
-                "status": "research_queued",
+                "status": ExecutionJobStatus.QUEUED,
                 "progress": "0",
                 "tenant_id": tenant_id,
                 "updated_at": now_iso,
@@ -242,4 +225,4 @@ async def run(
         "run: queued job_id=%s report_id=%s tenant_id=%s",
         body.job_id, report_id, tenant_id,
     )
-    return RunResponse(job_id=body.job_id, report_id=report_id, status="research_queued")
+    return RunResponse(job_id=body.job_id, report_id=report_id, status=ExecutionJobStatus.QUEUED)

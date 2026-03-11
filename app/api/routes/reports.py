@@ -17,6 +17,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 
+from bson import ObjectId
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
@@ -98,7 +99,7 @@ async def list_reports(
     items = [
         ReportListItem(
             report_id=doc["report_id"],
-            job_id=doc.get("job_id", ""),
+            job_id=str(doc.get("job_id", "")),
             tenant_id=doc["tenant_id"],
             user_id=doc["user_id"],
             topic=doc.get("topic", ""),
@@ -162,7 +163,7 @@ async def get_report(
 
     return ReportDetailResponse(
         report_id=doc["report_id"],
-        job_id=doc.get("job_id", ""),
+        job_id=str(doc.get("job_id", "")),
         tenant_id=doc["tenant_id"],
         user_id=doc["user_id"],
         topic=doc.get("topic", ""),

@@ -26,10 +26,9 @@ Usage::
 
 from __future__ import annotations
 
-import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import AsyncIterator
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI
@@ -39,35 +38,12 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from app.api.routes import plan, reports, run, status
 from app.api.websocket import router as ws_router
 from app.config import settings
-from app.tracing import init_langfuse, init_otel
+from app.logging_utils import setup_json_logging
+from app.tracing import get_langfuse, init_langfuse, init_otel, shutdown_otel
 from db.indexes import setup_all_indexes
 
 
-# ---------------------------------------------------------------------------
-# JSON log formatter — injects OTEL trace_id/span_id into every log line
-# (otelTraceID / otelSpanID are added automatically by LoggingInstrumentor)
-# ---------------------------------------------------------------------------
-
-class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        out: dict[str, Any] = {
-            "ts": self.formatTime(record),
-            "level": record.levelname,
-            "logger": record.name,
-            "msg": record.getMessage(),
-            "trace_id": getattr(record, "otelTraceID", ""),
-            "span_id": getattr(record, "otelSpanID", ""),
-            "service": settings.otel_service_name,
-        }
-        if record.exc_info:
-            out["exc"] = self.formatException(record.exc_info)
-        return json.dumps(out)
-
-
-_json_handler = logging.StreamHandler()
-_json_handler.setFormatter(_JsonFormatter())
-logging.root.addHandler(_json_handler)
-logging.root.setLevel(logging.INFO)
+setup_json_logging(settings.otel_service_name)
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +128,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.mongo.close()
     except Exception as exc:
         logger.error("shutdown: MongoDB close error — %s", exc)
+
+    logger.info("shutdown: flushing Langfuse …")
+    try:
+        lf = get_langfuse()
+        if lf is not None:
+            lf.flush()
+    except Exception as exc:
+        logger.error("shutdown: Langfuse flush error — %s", exc)
+
+    logger.info("shutdown: shutting down OTEL …")
+    shutdown_otel()
 
     logger.info("shutdown: complete")
 

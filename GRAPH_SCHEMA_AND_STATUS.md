@@ -8,14 +8,15 @@
 ## Table of Contents
 
 1. [Architecture Overview](#1-architecture-overview)
-2. [Planning Graph — State Schema](#2-planning-graph--state-schema)
-3. [Execution Graph — State Schemas](#3-execution-graph--state-schemas)
-4. [MongoDB Collections — Schema Reference](#4-mongodb-collections--schema-reference)
-5. [Planning Graph — Status Lifecycle](#5-planning-graph--status-lifecycle)
-6. [Execution Graph — Status Lifecycle](#6-execution-graph--status-lifecycle)
-7. [All MongoDB Writes — What, When, Where](#7-all-mongodb-writes--what-when-where)
-8. [Redis Keys Reference](#8-redis-keys-reference)
-9. [Complete Status Transition Diagram](#9-complete-status-transition-diagram)
+2. [Canonical Status Enumerations](#2-canonical-status-enumerations)
+3. [Planning Graph — State Schema](#3-planning-graph--state-schema)
+4. [Execution Graph — State Schemas](#4-execution-graph--state-schemas)
+5. [MongoDB Collections — Schema Reference](#5-mongodb-collections--schema-reference)
+6. [Planning Graph — Status Lifecycle](#6-planning-graph--status-lifecycle)
+7. [Execution Graph — Status Lifecycle](#7-execution-graph--status-lifecycle)
+8. [All MongoDB Writes — What, When, Where](#8-all-mongodb-writes--what-when-where)
+9. [Redis Keys Reference](#9-redis-keys-reference)
+10. [Complete Status Transition Diagram](#10-complete-status-transition-diagram)
 
 ---
 
@@ -27,40 +28,87 @@ Client
   ▼
 POST /api/deepresearch/plan         ← Planning Graph (runs SYNCHRONOUSLY inside FastAPI)
   │   returns: plan or clarification questions
-  │   MongoDB: Deep_Research_Jobs upserted after every call
+  │   MongoDB: Deep_Research_Jobs pre-inserted (PLAN_INITIATED) then upserted after every call
   │
   ▼
 POST /api/deepresearch/run          ← User approves plan
-  │   MongoDB: Deep_Research_Jobs updated + Deep_Research_Reports inserted + Background_Jobs inserted
+  │   MongoDB: Deep_Research_Jobs updated (→ QUEUED) + Deep_Research_Reports inserted (QUEUED)
   │   Redis:   job:{job_id}:status hash created
+  │   Note: NO Background_Jobs insert — removed from this service
   │
   ▼
 EKS Worker picks up job
   │
   ▼
 Execution Graph (runs ASYNCHRONOUSLY in EKS Worker)
-  │   MongoDB: Deep_Research_Jobs updated at start and end
-  │            Deep_Research_Reports updated on completion
+  │   MongoDB: Deep_Research_Jobs updated at start (→ RUNNING) and end (→ COMPLETED/FAILED)
+  │            Deep_Research_Reports updated on completion (→ COMPLETED/FAILED)
   │   Redis:   job:{job_id}:status updated throughout
   │   S3:      HTML report uploaded
   │
   ▼
 GET /api/deepresearch/status/{job_id}   ← Redis (fast) → MongoDB (fallback)
 GET /api/deepresearch/reports/{report_id}
-WS  /ws/deep-research/{job_id}          ← Redis pub/sub stream
+WS  /ws/deep-research/{job_id}?tenant_id=...   ← Redis pub/sub stream; tenant_id is query param
 ```
 
 **Key separation:** The Planning Graph and Execution Graph run in completely different processes.
 They share state only through MongoDB (`Deep_Research_Jobs` document).
 
+**Document identity:** `Deep_Research_Jobs._id` is a MongoDB `ObjectId`. The string form of this
+ObjectId is used as `job_id` in all API responses and LangGraph `thread_id`. Queries always filter
+by `{"_id": ObjectId(job_id), "tenant_id": ...}`.
+
 ---
 
-## 2. Planning Graph — State Schema
+## 2. Canonical Status Enumerations
+
+**File:** `app/enums.py` — **single source of truth for all job status strings.**
+
+All route files, executor, and exporter import from here. Never use raw string literals
+for status values — always use the enum.
+
+```python
+# app/enums.py
+
+class PlanningJobStatus(str, Enum):
+    PLAN_INITIATED      = "PLAN_INITIATED"     # Set on pre-insert before graph runs (Mode 1)
+    NEED_CLARIFICATION  = "NEED_CLARIFICATION" # Graph needs user to answer questions
+    PLAN_READY          = "PLAN_READY"         # Plan complete; waiting for user approval via /run
+    PLAN_EDIT_REQUESTED = "PLAN_EDIT_REQUESTED" # Set when Mode 3 revision starts
+    PLAN_CANCELED       = "PLAN_CANCELED"      # User cancelled via /run action="cancel"
+
+
+class ExecutionJobStatus(str, Enum):
+    QUEUED    = "QUEUED"     # /run called; EKS Worker not yet started
+    RUNNING   = "RUNNING"   # Worker started; execution graph active
+    COMPLETED = "COMPLETED" # Full success — report in S3 + MongoDB
+    FAILED    = "FAILED"    # Unrecoverable error
+```
+
+### Streaming-only statuses (Redis only — never stored in MongoDB)
+
+These appear in the `job:{job_id}:status` Redis hash and WebSocket events during execution,
+but are **never written to MongoDB**:
+
+| Value | Published by | Meaning |
+|---|---|---|
+| `initializing` | executor.py (streamer) | Worker started, loading files |
+| `researching` | supervisor node | Sections running in parallel |
+| `reflecting` | supervisor node (phase 2) | LLM reflection round |
+| `fusing` | knowledge_fusion node | Merging all findings |
+| `writing` | report_writer node | Generating HTML report |
+| `reviewing` | report_reviewer node | Quality check |
+| `exporting` | executor.py (streamer) | Writing to S3 + MongoDB |
+
+---
+
+## 3. Planning Graph — State Schema
 
 **File:** `graphs/planning/state.py`
 **Used by:** All planning nodes + `app/api/routes/plan.py`
 
-### 2.1 Auxiliary Types
+### 3.1 Auxiliary Types
 
 #### `ChatMessage`
 ```
@@ -91,7 +139,7 @@ sections           : list[PlanSection]
 estimated_sources  : int              # total expected source count (UI progress bar)
 ```
 
-### 2.2 `PlanningState` — Full Field Reference
+### 3.2 `PlanningState` — Full Field Reference
 
 | Group | Field | Type | Default | Description |
 |---|---|---|---|---|
@@ -120,10 +168,13 @@ estimated_sources  : int              # total expected source count (UI progress
 | | `plan_revision_count` | `int` | `0` | Incremented on each user rejection |
 | | `plan_feedback` | `str \| None` | `None` | User's rejection feedback text |
 | | `checklist` | `list[str]` | `[]` | Quality gates (3-5 items) |
-| **Lifecycle** | `status` | `PlanningStatus` | `"pending"` | See Section 5 |
+| **Lifecycle** | `status` | `PlanningStatus` | `"pending"` | Graph-internal only — see Section 6 |
 | | `error` | `str \| None` | `None` | Set when status = "failed" |
 
-### 2.3 `PlanningStatus` — All Values
+### 3.3 `PlanningStatus` — Graph-Internal Values
+
+> **IMPORTANT:** These are graph-internal state values. They are **NOT stored in MongoDB as-is**.
+> The plan endpoint maps them to `PlanningJobStatus` enum values before saving. See Section 6.2.
 
 ```python
 PlanningStatus = Literal[
@@ -136,7 +187,7 @@ PlanningStatus = Literal[
 ]
 ```
 
-### 2.4 Planning Graph Node → State Changes
+### 3.4 Planning Graph Node → State Changes
 
 | Node | Fields Written to State | Status Set |
 |---|---|---|
@@ -150,15 +201,18 @@ PlanningStatus = Literal[
 
 ---
 
-## 3. Execution Graph — State Schemas
+## 4. Execution Graph — State Schemas
 
 **File:** `graphs/execution/state.py`
 
-### 3.1 `ExecutionStatus` — All Values
+### 4.1 `ExecutionStatus` — All Values
+
+> **Note:** Only `COMPLETED` and `FAILED` (uppercase) are stored in MongoDB.
+> The lowercase streaming values appear only in Redis and WebSocket events.
 
 ```python
 ExecutionStatus = Literal[
-    "queued",           # job created, EKS Worker not yet started
+    # Streaming-only (Redis + WebSocket) — never in MongoDB:
     "initializing",     # worker started, loading file contents from Redis
     "researching",      # section sub-graphs running in parallel
     "reflecting",       # supervisor reflection round running
@@ -166,13 +220,16 @@ ExecutionStatus = Literal[
     "writing",          # report_writer streaming HTML
     "reviewing",        # report_reviewer checking quality
     "exporting",        # exporter writing to S3 + MongoDB
-    "completed",        # full success
-    "partial_success",  # some sections failed but report still generated
-    "failed",           # unrecoverable error, no report produced
+
+    # Stored in MongoDB (via ExecutionJobStatus enum):
+    "QUEUED",           # job created, EKS Worker not yet started
+    "RUNNING",          # worker active
+    "COMPLETED",        # full success
+    "FAILED",           # unrecoverable error
 ]
 ```
 
-### 3.2 `ToolsEnabled`
+### 4.2 `ToolsEnabled`
 ```
 web           : bool
 arxiv         : bool
@@ -180,7 +237,7 @@ content_lake  : bool
 files         : bool
 ```
 
-### 3.3 `RawSearchResult` (intermediate, not persisted to MongoDB)
+### 4.3 `RawSearchResult` (intermediate, not persisted to MongoDB)
 ```
 result_id    : str        # UUID for deduplication
 source_type  : SourceType
@@ -192,7 +249,7 @@ published_at : str        # ISO-8601 or ""
 score        : float      # relevance 0.0–1.0 from search tool
 ```
 
-### 3.4 `VerifiedUrl` (intermediate, not persisted to MongoDB)
+### 4.4 `VerifiedUrl` (intermediate, not persisted to MongoDB)
 ```
 url          : str
 is_authentic : bool    # False if redirect trap, paywalled, or 404
@@ -200,7 +257,7 @@ url_hash     : str     # SHA-256 of normalised URL — Redis/Mongo key
 domain       : str     # e.g. "arxiv.org"
 ```
 
-### 3.5 `Citation` (persisted trimmed form to Deep_Research_Reports)
+### 4.5 `Citation` (persisted trimmed form to Deep_Research_Reports)
 ```
 citation_id  : str        # UUID
 section_id   : str
@@ -214,7 +271,7 @@ trust_tier   : int        # 1=files, 2=content_lake, 3=arxiv, 4=web
 ```
 > **Note:** When saved to MongoDB, trimmed to `{id, title, url, source_type}` only.
 
-### 3.6 `SourceScore` (internal graph state only — not persisted to MongoDB)
+### 4.6 `SourceScore` (internal graph state only — not persisted to MongoDB)
 ```
 url_hash            : str
 url                 : str
@@ -232,7 +289,7 @@ scored_at           : str        # ISO-8601
 > then read by `knowledge_fusion.py` to sort/rank findings for the LLM prompt.
 > **Not written to any MongoDB collection.**
 
-### 3.7 `CompressedFinding` (intermediate, used by knowledge_fusion)
+### 4.7 `CompressedFinding` (intermediate, used by knowledge_fusion)
 ```
 section_id          : str
 section_title       : str
@@ -245,7 +302,7 @@ Compression targets by depth:
 - `intermediate`: ~5,000 tokens (5 sources)
 - `in-depth`: ~8,000 tokens (10 sources)
 
-### 3.8 `SectionResult` (returned from each section sub-graph to supervisor)
+### 4.8 `SectionResult` (returned from each section sub-graph to supervisor)
 ```
 section_id              : str
 section_title           : str
@@ -255,7 +312,7 @@ search_iterations_used  : int
 error                   : str | None    # None when status = "completed"
 ```
 
-### 3.9 `SectionResearchState` — Full Field Reference
+### 4.9 `SectionResearchState` — Full Field Reference
 
 State for each isolated section sub-graph (spawned via `Send()` API).
 
@@ -282,12 +339,12 @@ State for each isolated section sub-graph (spawned via `Send()` API).
 | | `section_citations` | `list[Citation]` | |
 | | `section_source_scores` | `list[SourceScore]` | |
 
-### 3.10 `ExecutionState` — Full Field Reference
+### 4.10 `ExecutionState` — Full Field Reference
 
 | Group | Field | Type | Default | Description |
 |---|---|---|---|---|
-| **Identity** | `job_id` | `str` | required | Primary key; also LangGraph thread_id |
-| | `report_id` | `str` | required | Pre-assigned report document ID |
+| **Identity** | `job_id` | `str` | required | String form of Deep_Research_Jobs `_id`; also LangGraph thread_id |
+| | `report_id` | `str` | required | UUID4 string; pre-assigned by /run |
 | | `tenant_id` | `str` | required | Partition key — MUST be on every DB query |
 | | `user_id` | `str` | required | |
 | **Topic** | `topic` | `str` | `""` | Original user query |
@@ -314,11 +371,11 @@ State for each isolated section sub-graph (spawned via `Send()` API).
 | | `revision_count` | `int` | `0` | Writer→reviewer revision loops (max 1) |
 | | `s3_key` | `str \| None` | `None` | None until exporter uploads |
 | **Lifecycle** | `progress` | `int` | `0` | 0–100 percentage |
-| | `status` | `ExecutionStatus` | `"initializing"` | See Section 6 |
-| | `error` | `str \| None` | `None` | Set on failed / partial_success |
+| | `status` | `ExecutionStatus` | `"initializing"` | See Section 7 |
+| | `error` | `str \| None` | `None` | Set on failed |
 | **Observability** | `otel_trace_id` | `str` | `""` | OpenTelemetry trace ID |
 
-### 3.11 Execution Graph Node → State Changes
+### 4.11 Execution Graph Node → State Changes
 
 | Node | Fields Written | Status Transition |
 |---|---|---|
@@ -328,23 +385,26 @@ State for each isolated section sub-graph (spawned via `Send()` API).
 | `knowledge_fusion` | `fused_knowledge`, `status="fusing"` | → `fusing` |
 | `report_writer` | `report_html`, `status="writing"` | → `writing` |
 | `report_reviewer` | `review_feedback`, `revision_count`, `status="reviewing"` | → `reviewing` |
-| `exporter` | `s3_key`, `status`, `error`, `progress` | → `exporting` → `completed` / `partial_success` |
-| *(on crash)* | `error` | → `failed` |
+| `exporter` | `s3_key`, `status`, `error`, `progress` | → `exporting` → `COMPLETED` / `FAILED` |
+| *(on crash)* | `error` | → `FAILED` |
 
 ---
 
-## 4. MongoDB Collections — Schema Reference
+## 5. MongoDB Collections — Schema Reference
 
 **Database:** `Dev_Kadal` (Atlas cluster)
 
-### 4.1 `Deep_Research_Jobs`
+### 5.1 `Deep_Research_Jobs`
 
 Primary document — exists for the full lifetime of a research session.
 
+**Identity:** `_id` is MongoDB ObjectId (primary key). `job_id` in API responses is the string
+representation of `_id`. All queries filter by `{"_id": ObjectId(job_id), "tenant_id": ...}`.
+
 ```jsonc
 {
-  "job_id"        : "uuid4",            // unique; used as LangGraph thread_id
-  "report_id"     : "uuid4 | null",     // set when /run is called
+  // _id is MongoDB ObjectId — primary key; never stored as a separate field
+  "report_id"     : "uuid4 | null",     // set when /run is called; UUID4 string
   "tenant_id"     : "string",           // MANDATORY on every query
   "user_id"       : "string",
   "chat_bot_id"   : "",                 // deprecated, always ""
@@ -354,8 +414,9 @@ Primary document — exists for the full lifetime of a research session.
 
   "llm_model"     : "google/gemini-2.5-pro",  // provider/model_name
 
-  // ── Status (see Section 5 & 6 for all values and transitions) ─────────
-  "status"        : "plans_ready",      // see Section 5.2 for all values
+  // ── Status (see Sections 6 & 7 for all values and transitions) ─────────
+  // Uses PlanningJobStatus or ExecutionJobStatus enum values (always UPPERCASE)
+  "status"        : "PLAN_READY",       // see Section 2 for all valid values
 
   "progress"      : 0,                  // 0–100 (set during execution)
 
@@ -413,21 +474,21 @@ Primary document — exists for the full lifetime of a research session.
 }
 ```
 
-**Indexes:**
-- `{ job_id: 1 }` — UNIQUE
-- `{ tenant_id: 1, user_id: 1 }`
-- `{ status: 1 }`
+**Indexes** (from `db/indexes.py`):
+- `{ tenant_id: 1, user_id: 1 }` — name: `tenant_user`
+- `{ status: 1 }` — name: `status`
+- **No explicit `job_id` UNIQUE index** — uniqueness enforced by MongoDB `_id` (ObjectId)
 
 ---
 
-### 4.2 `Deep_Research_Reports`
+### 5.2 `Deep_Research_Reports`
 
-Created by `/run`, finalised by `exporter.py`.
+Created by `/run` (status=`QUEUED`), finalised by `exporter.py` (status=`COMPLETED`/`FAILED`).
 
 ```jsonc
 {
-  "report_id"        : "uuid4",        // unique
-  "job_id"           : "uuid4",        // FK to Deep_Research_Jobs
+  "report_id"        : "uuid4",        // unique UUID4 string
+  "job_id"           : ObjectId,       // FK to Deep_Research_Jobs._id (stored as ObjectId)
   "tenant_id"        : "string",       // MANDATORY on every query
   "user_id"          : "string",
   "chat_bot_id"      : "",             // deprecated
@@ -441,7 +502,8 @@ Created by `/run`, finalised by `exporter.py`.
   "section_count"    : 5,              // number of plan sections
 
   // ── Populated by exporter ─────────────────────────────────────────────
-  "status"           : "research_queued",  // → "completed" after exporter runs
+  // Uses ExecutionJobStatus enum: "QUEUED" → "COMPLETED" or "FAILED"
+  "status"           : "QUEUED",       // → "COMPLETED" or "FAILED" after exporter runs
   "s3_key"           : null,           // set by exporter: deep-research/{tenant}/{user}/{report_id}.html
   "summary"          : null,           // first 500 chars of HTML stripped of tags
   "citation_count"   : 0,             // length of citations array
@@ -454,48 +516,34 @@ Created by `/run`, finalised by `exporter.py`.
 }
 ```
 
-**Indexes:**
-- `{ report_id: 1 }` — UNIQUE
-- `{ tenant_id: 1, user_id: 1, executed_at: -1 }`
+**Indexes** (from `db/indexes.py`):
+- `{ report_id: 1 }` — UNIQUE, name: `report_id_unique`
+- `{ tenant_id: 1, user_id: 1, executed_at: -1 }` — name: `tenant_user_executed_at`
 
 ---
 
-### 4.3 `Background_Jobs`
+### 5.3 `Background_Jobs`
 
-Platform-level job queue. Consumed by EKS Job scheduler.
-
-```jsonc
-{
-  "job_id"            : "uuid4",       // same as Deep_Research_Jobs.job_id
-  "job_type"          : "DEEP_RESEARCH",
-  "tenant_id"         : "string",
-  "source_path"       : "",
-  "call_back_url"     : null,
-  "job_submitted_date": "ISO-8601",
-  "job_status"        : "QUEUED",      // platform scheduler updates this
-  "error"             : null,
-  "job_completed_date": null
-}
-```
-
-**Indexes:**
-- `{ job_type: 1, job_status: 1 }`
-- `{ job_id: 1 }`
+> **NOTE:** Kadal's `/run` endpoint **no longer inserts** into `Background_Jobs`.
+> This insert was present in earlier code but has been removed. `Background_Jobs` may still
+> exist in the Atlas cluster for platform use by other services, but `run.py` does not write to it.
+> No indexes for `Background_Jobs` are defined in `db/indexes.py`.
 
 ---
 
-### 4.4 `Langgraph_Checkpoints`
+### 5.4 `Langgraph_Checkpoints`
 
 Managed automatically by `AsyncMongoDBSaver`. Thread_id = job_id.
 Used for crash recovery — worker resumes from last completed node.
 
 ---
 
-## 5. Planning Graph — Status Lifecycle
+## 6. Planning Graph — Status Lifecycle
 
-### 5.1 Graph-internal `PlanningStatus`
+### 6.1 Graph-internal `PlanningStatus`
 
-These are the values inside the `PlanningState.status` field while the graph runs:
+These values live in `PlanningState.status` while the graph runs. They are graph-internal
+and are mapped to MongoDB enum values before any DB write.
 
 ```
 pending
@@ -522,18 +570,35 @@ pending
   (any node failure) → failed
 ```
 
-### 5.2 MongoDB `status` in `Deep_Research_Jobs` (mapped from graph status)
+### 6.2 MongoDB `status` in `Deep_Research_Jobs` (mapped from graph status)
 
-The plan endpoint maps `PlanningStatus` → DB status before saving:
+The plan endpoint maps graph-internal `PlanningStatus` → `PlanningJobStatus` enum before saving:
 
-| Graph `PlanningState.status` | Stored in DB as | Meaning |
+| Graph `PlanningState.status` | Stored in DB as | When |
 |---|---|---|
-| `awaiting_approval` | **`plans_ready`** | Plan complete, waiting for user approval |
-| `needs_clarification` | **`needs_clarification`** | Questions sent back to user |
-| `failed` | **`failed`** | Planning error |
-| *(other)* | same value | Raw graph status |
+| *(Mode 1 pre-insert, before graph)* | **`PLAN_INITIATED`** | Immediately on Mode 1 call, before graph runs |
+| `awaiting_approval` | **`PLAN_READY`** | After plan_creator + plan_reviewer succeed |
+| `needs_clarification` | **`NEED_CLARIFICATION`** | When clarification questions are generated |
+| `failed` | **`failed`** | Planning error (raw value — graph sets this) |
+| *(Mode 3 starts, before graph re-runs)* | **`PLAN_EDIT_REQUESTED`** | Before graph re-runs in Mode 3 |
+| *(cancel action in /run)* | **`PLAN_CANCELED`** | User cancels via /run action="cancel" |
 
-### 5.3 Mode Routing Summary
+### 6.3 Mode 1 — Pre-insert Pattern
+
+Mode 1 (fresh plan) now **pre-inserts a minimal document** with `status=PLAN_INITIATED` before
+running the graph. This reserves the ObjectId immediately. After the graph completes, a full
+`replace_one(upsert=True)` overwrites the document.
+
+```python
+# Pre-insert (before graph):
+{"_id": oid, "tenant_id": ..., "user_id": ..., "topic": ...,
+ "status": "PLAN_INITIATED", "created_at": ..., "updated_at": ...}
+
+# Full replace (after graph):
+replace_one({"_id": ObjectId(job_id), "tenant_id": tenant_id}, full_doc, upsert=True)
+```
+
+### 6.4 Mode Routing Summary
 
 | Request shape | Mode | Graph entry point |
 |---|---|---|
@@ -548,65 +613,70 @@ The plan endpoint maps `PlanningStatus` → DB status before saving:
 
 ---
 
-## 6. Execution Graph — Status Lifecycle
+## 7. Execution Graph — Status Lifecycle
 
-### 6.1 Full Status Transition (in DB order)
+### 7.1 Full Status Transition (in chronological order)
 
 ```
 [/run called]
-research_queued                ← set by run.py in Deep_Research_Jobs + Deep_Research_Reports
-      │                           set by run.py in Redis job:{job_id}:status
-      ▼
+Deep_Research_Jobs:    PLAN_READY → QUEUED
+Deep_Research_Reports: (created)  → QUEUED
+Redis hash:            status=QUEUED, progress=0
+
 [EKS Worker starts]
-research                       ← set by executor.py immediately on start (Deep_Research_Jobs)
-      │
-      ▼ (supervisor phase 1: dispatches sections)
-researching                    ← status in Redis (via streamer); graph-internal status
-      │
-      ▼ (all sections complete)
-reflecting                     ← supervisor phase 2 (LLM reflection round, max 2)
-      │
-      ▼ (gaps resolved or max rounds reached)
-fusing                         ← knowledge_fusion node
-      │
-      ▼
-writing                        ← report_writer node
-      │
-      ▼
-reviewing                      ← report_reviewer node
-      │         ┌──────────────────────┐
-      │         │ needs_revision?       │
-      │         └─────── max 1 loop ───┘
-      ▼
-exporting                      ← exporter node running
+Deep_Research_Jobs:    QUEUED → RUNNING  (set by executor.py immediately)
+Redis hash:            status=initializing, started_at=... (streaming only)
 
-      ├──► completed            ← exporter sets in Deep_Research_Jobs + Deep_Research_Reports
-      │                            Redis progress=100
-      │
-      └──► partial_success      ← exporter sets if S3 or MongoDB write had errors
-                                   Redis progress=90
+[supervisor phase 1: dispatches sections]
+Redis hash:            status=researching (streaming only)
 
-[exception in executor]
-      └──► failed               ← executor.py sets in Deep_Research_Jobs
+[each section_subgraph completes]
+Redis hash:            status=researching, progress 10%→80% (streaming only)
+
+[supervisor phase 2, if depth warrants reflection]
+Redis hash:            status=reflecting (streaming only)
+
+[knowledge_fusion]
+Redis hash:            status=fusing, progress=82% (streaming only)
+
+[report_writer]
+Redis hash:            status=writing, progress=90% (streaming only)
+
+[report_reviewer]
+Redis hash:            status=reviewing, progress=95% (streaming only)
+(loop back to writer max 1 time if revision needed)
+
+[exporter node]
+Redis hash:            status=exporting, progress=99% (streaming only)
+Deep_Research_Reports: QUEUED → COMPLETED (or FAILED if any error)
+Deep_Research_Jobs:    RUNNING → COMPLETED (or FAILED) — set by exporter
+
+[executor success confirmation]
+Deep_Research_Jobs:    status=COMPLETED, progress=100
+
+[executor exception]
+Deep_Research_Jobs:    status=FAILED
 ```
 
-### 6.2 `ExecutionStatus` Values — Quick Reference
+> **Removed:** `partial_success` no longer exists. Exporter errors set `FAILED`.
 
-| Status | Set By | Stored In | Meaning |
+### 7.2 `ExecutionStatus` Values — Quick Reference
+
+| Status | Stored In | Set By | Meaning |
 |---|---|---|---|
-| `queued` | *(initial value in state)* | Redis | Job created, worker not started |
-| `initializing` | executor.py (state init) | Redis (streamer) | Worker loading files |
-| `researching` | supervisor node | Redis (streamer) | Sections running in parallel |
-| `reflecting` | supervisor node (phase 2) | Redis (streamer) | LLM reflection round |
-| `fusing` | knowledge_fusion node | Redis (streamer) | Merging all findings |
-| `writing` | report_writer node | Redis (streamer) | Generating HTML report |
-| `reviewing` | report_reviewer node | Redis (streamer) | Quality check |
-| `exporting` | executor.py (streamer) | Redis (streamer) | Writing to S3 + MongoDB |
-| `completed` | exporter.py | MongoDB + Redis | Full success |
-| `partial_success` | exporter.py | MongoDB + Redis | Report generated with errors |
-| `failed` | executor.py (catch block) | MongoDB + Redis | Unrecoverable error |
+| `QUEUED` | MongoDB + Redis | run.py | Job created, worker not started |
+| `RUNNING` | MongoDB | executor.py | Worker started; graph running |
+| `initializing` | Redis only | executor.py (streamer) | Worker loading files |
+| `researching` | Redis only | supervisor node | Sections running in parallel |
+| `reflecting` | Redis only | supervisor node (phase 2) | LLM reflection round |
+| `fusing` | Redis only | knowledge_fusion node | Merging all findings |
+| `writing` | Redis only | report_writer node | Generating HTML report |
+| `reviewing` | Redis only | report_reviewer node | Quality check |
+| `exporting` | Redis only | executor.py (streamer) | Writing to S3 + MongoDB |
+| `COMPLETED` | MongoDB + Redis | exporter.py + executor.py | Full success |
+| `FAILED` | MongoDB + Redis | exporter.py or executor.py | Error (no report, or partial) |
 
-### 6.3 `SectionResult.status` Values
+### 7.3 `SectionResult.status` Values
 
 Each section sub-graph returns one of:
 
@@ -618,36 +688,77 @@ Each section sub-graph returns one of:
 
 ---
 
-## 7. All MongoDB Writes — What, When, Where
+## 8. All MongoDB Writes — What, When, Where
 
-### 7.1 POST `/api/deepresearch/plan` (every call)
+### 8.1 POST `/api/deepresearch/plan` (every call)
 
-**Collection: `Deep_Research_Jobs`** — `replace_one(upsert=True)`
+**Collection: `Deep_Research_Jobs`**
 
-| Trigger | Fields Written | DB Status Set |
-|---|---|---|
-| Mode 1 fresh plan | Full document (all fields) | `needs_clarification` OR `plans_ready` |
-| Mode 2 clarification answered | Full document (replace) | `needs_clarification` OR `plans_ready` |
-| Mode 3 plan revision | Full document (replace) | `plans_ready` |
+#### Mode 1 — Two-phase write:
 
-**Document written:** All fields listed in Section 4.1.
-Fields updated every call: `planning_state`, `status`, `plan`, `checklist`, `analysis`, `refined_topic`, `updated_at`, `metadata`.
+**Phase 1 — Pre-insert** (before graph, reserves ObjectId):
+```
+insert_one({
+  "_id": ObjectId (new),
+  "tenant_id": ...,
+  "user_id": ...,
+  "topic": ...,
+  "status": "PLAN_INITIATED",
+  "created_at": now_iso,
+  "updated_at": now_iso,
+})
+```
+
+**Phase 2 — Full replace** (after graph completes):
+```
+replace_one(
+  filter: { "_id": ObjectId(job_id), "tenant_id": tenant_id },
+  replacement: full_doc (all fields from Section 5.1),
+  upsert=True
+)
+Status set: "NEED_CLARIFICATION" or "PLAN_READY"
+```
+
+#### Mode 2 (clarification) — Full replace after graph:
+```
+replace_one(filter: { "_id": ObjectId(job_id), "tenant_id": tenant_id }, full_doc, upsert=True)
+Status set: "NEED_CLARIFICATION" or "PLAN_READY"
+```
+
+#### Mode 3 (plan revision) — Two writes:
+
+**Write 1** (before graph, signals revision in-flight):
+```
+update_one(
+  filter: { "_id": ObjectId(job_id), "tenant_id": tenant_id },
+  $set: { "status": "PLAN_EDIT_REQUESTED", "updated_at": now_iso }
+)
+```
+
+**Write 2** (after graph, full replace):
+```
+replace_one(filter, full_doc, upsert=True)
+Status set: "PLAN_READY"
+```
+
+Fields updated every call: `planning_state`, `status`, `plan`, `checklist`, `analysis`,
+`refined_topic`, `updated_at`, `metadata`.
 
 ---
 
-### 7.2 POST `/api/deepresearch/run`
+### 8.2 POST `/api/deepresearch/run`
 
-Three MongoDB writes happen in sequence:
+Two MongoDB writes happen in sequence (Background_Jobs is **not** written):
 
 #### Write 1 — `Deep_Research_Jobs` UPDATE
 
 ```
-Filter:  { job_id, tenant_id }
-Condition: status must == "plans_ready" (400 error otherwise)
+Filter:  { "_id": ObjectId(job_id), "tenant_id": tenant_id }
+Condition: status must == "PLAN_READY" (400 error otherwise)
 
 $set:
-  status        → "research_queued"
-  report_id     → uuid4 (newly generated)
+  status        → "QUEUED"        (ExecutionJobStatus.QUEUED)
+  report_id     → uuid4 (newly generated UUID4 string)
   updated_at    → now_iso
   metadata.otel_carrier    → W3C carrier dict
   metadata.otel_trace_id   → traceparent value
@@ -657,8 +768,8 @@ $set:
 
 ```
 New document:
-  report_id          = uuid4
-  job_id             = body.job_id
+  report_id          = uuid4 (UUID4 string)
+  job_id             = ObjectId(body.job_id)    ← stored as ObjectId, not string
   tenant_id          = from token
   user_id            = from token
   topic              = from job_doc
@@ -670,49 +781,39 @@ New document:
   citation_count     = 0
   summary            = null
   citations          = []
-  status             = "research_queued"
+  status             = "QUEUED"                ← ExecutionJobStatus.QUEUED
   s3_key             = null
   executed_at        = null
   created_at         = now_iso
 ```
 
-#### Write 3 — `Background_Jobs` INSERT (non-fatal)
-
+**On cancel action** (`action="cancel"`):
 ```
-New document:
-  job_id              = body.job_id
-  job_type            = "DEEP_RESEARCH"
-  tenant_id           = from token
-  source_path         = ""
-  call_back_url       = null
-  job_submitted_date  = now_iso
-  job_status          = "QUEUED"
-  error               = null
-  job_completed_date  = null
-```
-
-**On cancel action:**
-```
-Deep_Research_Jobs $set: { status: "cancelled", updated_at }
+Deep_Research_Jobs $set: { status: "PLAN_CANCELED", updated_at }
 ```
 
 ---
 
-### 7.3 `worker/executor.py` — On Worker Start
+### 8.3 `worker/executor.py` — On Worker Start
 
 **Collection: `Deep_Research_Jobs`** — UPDATE
 
 ```
-Filter: { job_id, tenant_id }
+Filter: { "_id": ObjectId(job_id), "tenant_id": tenant_id }
 $set:
-  status      → "research"
+  status      → "RUNNING"     (ExecutionJobStatus.RUNNING)
   started_at  → now_iso
   updated_at  → now_iso
 ```
 
+Also writes `started_at` to Redis hash:
+```
+HSET job:{job_id}:status started_at {started_at}
+```
+
 ---
 
-### 7.4 `graphs/execution/nodes/exporter.py` — On Completion
+### 8.4 `graphs/execution/nodes/exporter.py` — On Completion
 
 Two MongoDB writes happen in order:
 
@@ -722,14 +823,14 @@ Two MongoDB writes happen in order:
 Filter: { report_id, tenant_id }
 $set (full doc):
   report_id      = state.report_id
-  job_id         = state.job_id
+  job_id         = ObjectId(state.job_id)   ← stored as ObjectId
   tenant_id      = state.tenant_id
   user_id        = state.user_id
   topic          = state.topic
   refined_topic  = state.refined_topic
   llm_model      = fetched from Deep_Research_Jobs
   s3_key         = S3 key
-  status         = "completed"
+  status         = "COMPLETED"              (ExecutionJobStatus.COMPLETED)
   executed_at    = now_iso
   section_count  = len(state.sections)
   citation_count = len(citations)
@@ -738,52 +839,55 @@ $set (full doc):
   otel_trace_id  = state.otel_trace_id
 ```
 
+> **Note:** If S3 or MongoDB write fails, `status` is set to `"FAILED"` instead.
+> `partial_success` no longer exists — any error → `FAILED`.
+
 #### Write 2 — `Deep_Research_Jobs` UPDATE
 
 ```
-Filter: { job_id, tenant_id }
+Filter: { "_id": ObjectId(job_id), "tenant_id": tenant_id }
 $set:
-  status       → "completed" (or "partial_success" if errors occurred)
+  status       → "COMPLETED" (or "FAILED" if errors occurred)
   completed_at → now_iso
   updated_at   → now_iso
 ```
 
 ---
 
-### 7.5 `worker/executor.py` — On Success (after exporter completes)
+### 8.5 `worker/executor.py` — On Success (after exporter completes)
 
 **Collection: `Deep_Research_Jobs`** — UPDATE (confirmation write)
 
 ```
-Filter: { job_id, tenant_id }
+Filter: { "_id": ObjectId(job_id), "tenant_id": tenant_id }
 $set:
-  status    → "completed"
+  status    → "COMPLETED"    (ExecutionJobStatus.COMPLETED)
   progress  → 100
   updated_at → now_iso
 ```
 
 ---
 
-### 7.6 `worker/executor.py` — On Exception (catch block)
+### 8.6 `worker/executor.py` — On Exception (catch block)
 
 **Collection: `Deep_Research_Jobs`** — UPDATE
 
 ```
-Filter: { job_id } (+ tenant_id if already known)
+Filter: { "_id": ObjectId(job_id) } (+ tenant_id if already known)
 $set:
-  status     → "failed"
+  status     → "FAILED"      (ExecutionJobStatus.FAILED)
   error      → exception message string
   updated_at → now_iso
 ```
 
 ---
 
-## 8. Redis Keys Reference
+## 9. Redis Keys Reference
 
 | Key Pattern | Type | TTL | Content |
 |---|---|---|---|
 | `job:{job_id}:status` | Hash | 24 hr | `status`, `progress`, `tenant_id`, `updated_at`, `started_at` |
-| `job:{job_id}:events` | Pub/Sub channel | — | JSON events: `section_start`, `content_delta`, `progress`, `completed`, `error` |
+| `job:{job_id}:events` | Pub/Sub channel | — | JSON events published by streamer and exporter |
 | `file:{object_id}:content` | String | platform TTL | Extracted file text |
 | `rate:plan:day:{user_id}:{YYYY-MM-DD}` | Hash | 25 hr | `{job_id}: "planning"\|"completed"\|"failed"` |
 | `rate:run:{tenant_id}:{user_id}` | Counter | 1 hr | Increments per run call |
@@ -793,17 +897,29 @@ $set:
 - **Run** — hourly per-user-per-tenant counter; uses INCR+EXPIRE Lua script
 
 **WebSocket events published to `job:{job_id}:events`:**
+
+From `worker/streaming.py` (streamer):
 ```json
 { "type": "progress",       "status": "researching", "progress": 45, "section": "Section Title" }
 { "type": "section_start",  "section_id": "uuid",    "section_title": "string" }
 { "type": "content_delta",  "chunk": "html fragment" }
 { "type": "completed",      "report_id": "uuid",     "html_url": "presigned-s3-url" }
-{ "type": "error",          "status": "failed",      "message": "error string" }
+{ "type": "error",          "status": "FAILED",      "message": "error string" }
 ```
+
+From `exporter.py` (final status):
+```json
+{ "type": "completed", "status": "COMPLETED", "progress": 100, "updated_at": "ISO-8601" }
+{ "type": "error",     "status": "FAILED",    "progress": 90,  "updated_at": "ISO-8601" }
+```
+
+**WebSocket auth:** `tenant_id` is a **query parameter** (`?tenant_id=...`), not a header.
+The WebSocket handler verifies tenant via Redis hash → MongoDB fallback and closes with code
+`4403` on mismatch.
 
 ---
 
-## 9. Complete Status Transition Diagram
+## 10. Complete Status Transition Diagram
 
 ```
 ══════════════════════════════════════════════════════════════
@@ -811,26 +927,32 @@ $set:
 ══════════════════════════════════════════════════════════════
 
   [POST /plan - Mode 1]
-  DB: (document created with planning_state)
-  DB status: needs_clarification  ──► User answers ──► [POST /plan - Mode 2]
-                                                        DB status: plans_ready
-                                                               │
-  DB status: plans_ready  ◄────────────────────────────────────┘
-       ▲                         OR (plan approved directly)
+  DB: pre-insert with status=PLAN_INITIATED (reserves ObjectId)
+  DB: full replace after graph → NEED_CLARIFICATION or PLAN_READY
+
+  DB status: NEED_CLARIFICATION  ──► User answers ──► [POST /plan - Mode 2]
+                                                       DB status: PLAN_READY
+                                                              │
+  DB status: PLAN_READY  ◄──────────────────────────────────┘
+       ▲                        OR (plan approved directly)
        │
   [POST /plan - Mode 3: plan_feedback]
-  DB status: plans_ready  (revised plan)
+  DB status: PLAN_EDIT_REQUESTED (before graph)
+  DB status: PLAN_READY          (after revised plan)
+
+  [POST /run - action="cancel"]
+  DB status: PLAN_CANCELED
 
 
 ══════════════════════════════════════════════════════════════
-                  HANDOFF BOUNDARY (Human Approval)
+                HANDOFF BOUNDARY (Human Approval)
 ══════════════════════════════════════════════════════════════
 
-  [POST /run]  (requires job in plans_ready)
-  Deep_Research_Jobs:    plans_ready → research_queued
-  Deep_Research_Reports: (created)   → research_queued
-  Background_Jobs:       (created)   → QUEUED
-  Redis hash:            → research_queued
+  [POST /run]  (requires job in PLAN_READY)
+  Deep_Research_Jobs:    PLAN_READY → QUEUED
+  Deep_Research_Reports: (created)  → QUEUED
+  Redis hash:            status=QUEUED
+  (Background_Jobs: NOT written — removed from this service)
 
 
 ══════════════════════════════════════════════════════════════
@@ -838,46 +960,49 @@ $set:
 ══════════════════════════════════════════════════════════════
 
   [EKS Worker picks up job]
-  Deep_Research_Jobs:    research_queued → research
-  Redis hash:            → initializing (via streamer)
+  Deep_Research_Jobs:    QUEUED → RUNNING
+  Redis hash:            → initializing (streaming only)
 
   [supervisor dispatches sections in parallel]
-  Redis hash:            → researching
+  Redis hash:            → researching (streaming only)
 
   [each section_subgraph completes]
   Redis hash:            → researching (progress increments 10%→80%)
 
   [supervisor reflection, if needed]
-  Redis hash:            → reflecting
+  Redis hash:            → reflecting (streaming only)
 
   [knowledge_fusion]
-  Redis hash:            → fusing (82%)
+  Redis hash:            → fusing (82%) (streaming only)
 
   [report_writer]
-  Redis hash:            → writing (90%)
+  Redis hash:            → writing (90%) (streaming only)
 
   [report_reviewer]
-  Redis hash:            → reviewing (95%)
+  Redis hash:            → reviewing (95%) (streaming only)
   (loop back to writer max 1 time if revision needed)
 
   [exporter]
-  Redis hash:            → exporting (99%)
-  Deep_Research_Reports: research_queued → completed
+  Redis hash:            → exporting (99%) (streaming only)
+  Deep_Research_Reports: QUEUED → COMPLETED (or FAILED)
   S3:                    HTML uploaded
+  Deep_Research_Jobs:    RUNNING → COMPLETED (or FAILED)
 
   ┌─────────────────────────────────────────┐
   │ Success:                                │
-  │   Deep_Research_Jobs: → completed       │
-  │   Redis hash: → completed (100%)        │
+  │   Deep_Research_Jobs: → COMPLETED       │
+  │   executor confirmation: progress=100   │
+  │   Redis hash: → COMPLETED (100%)        │
   │   Redis pub/sub: "completed" event      │
   ├─────────────────────────────────────────┤
-  │ Partial (S3/Mongo error in exporter):   │
-  │   Deep_Research_Jobs: → partial_success │
-  │   Redis hash: → partial_success (90%)   │
+  │ Exporter error (S3/Mongo failure):      │
+  │   Deep_Research_Jobs: → FAILED          │
+  │   Deep_Research_Reports: → FAILED       │
+  │   Redis hash: → FAILED (90%)            │
   │   Redis pub/sub: "error" event          │
   ├─────────────────────────────────────────┤
   │ Crash (executor exception):             │
-  │   Deep_Research_Jobs: → failed          │
+  │   Deep_Research_Jobs: → FAILED          │
   │   Redis pub/sub: "error" event          │
   └─────────────────────────────────────────┘
 
@@ -886,31 +1011,36 @@ $set:
      ALL POSSIBLE DB STATUSES FOR Deep_Research_Jobs
 ══════════════════════════════════════════════════════════════
 
-  needs_clarification   ← plan.py: graph returned needs_clarification
-  plans_ready           ← plan.py: graph returned awaiting_approval
-  cancelled             ← run.py: user called /run with action="cancel"
-  research_queued       ← run.py: user approved plan
-  research              ← executor.py: worker started
-  completed             ← exporter.py + executor.py: full success
-  partial_success       ← exporter.py: report generated with storage errors
-  failed                ← executor.py: unrecoverable exception
+  PLAN_INITIATED       ← plan.py: pre-inserted before graph runs (Mode 1)
+  NEED_CLARIFICATION   ← plan.py: graph returned needs_clarification
+  PLAN_READY           ← plan.py: graph returned awaiting_approval
+  PLAN_EDIT_REQUESTED  ← plan.py: Mode 3 revision in-flight (before graph)
+  PLAN_CANCELED        ← run.py: user called /run with action="cancel"
+  QUEUED               ← run.py: user approved plan
+  RUNNING              ← executor.py: worker started
+  COMPLETED            ← exporter.py + executor.py: full success
+  FAILED               ← exporter.py or executor.py: error
 
 
 ══════════════════════════════════════════════════════════════
      ALL POSSIBLE STATUSES FOR Deep_Research_Reports
 ══════════════════════════════════════════════════════════════
 
-  research_queued       ← run.py: document created
-  completed             ← exporter.py: report written to S3 + MongoDB
+  QUEUED               ← run.py: document created
+  COMPLETED            ← exporter.py: report written to S3 + MongoDB
+  FAILED               ← exporter.py: S3 or MongoDB write error
 ```
 
 ---
 
-*Last updated: auto-generated from source code. Files referenced:*
+*Last updated: 2026-03-12. Files referenced:*
+- `app/enums.py`
 - `graphs/planning/state.py`
 - `graphs/execution/state.py`
 - `app/api/routes/plan.py`
 - `app/api/routes/run.py`
+- `app/api/routes/status.py`
+- `app/api/websocket.py`
 - `graphs/execution/nodes/exporter.py`
 - `worker/executor.py`
 - `db/indexes.py`

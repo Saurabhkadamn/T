@@ -40,7 +40,10 @@ from typing import Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
+from bson import ObjectId
+
 from app.config import settings
+from app.enums import ExecutionJobStatus
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +80,7 @@ async def _poll_mongo_fallback(
 
         try:
             doc = await db["Deep_Research_Jobs"].find_one(
-                {"job_id": job_id, "tenant_id": tenant_id},
+                {"_id": ObjectId(job_id), "tenant_id": tenant_id},
                 {"status": 1},
             )
         except Exception as exc:
@@ -92,10 +95,10 @@ async def _poll_mongo_fallback(
             continue
         last_status = current_status
 
-        if current_status == "completed":
+        if current_status == ExecutionJobStatus.COMPLETED:
             try:
                 report_doc = await db["Deep_Research_Reports"].find_one(
-                    {"job_id": job_id, "tenant_id": tenant_id},
+                    {"job_id": ObjectId(job_id), "tenant_id": tenant_id},
                     {"report_id": 1},
                 )
                 report_id = report_doc["report_id"] if report_doc else ""
@@ -112,12 +115,12 @@ async def _poll_mongo_fallback(
                 pass
             return
 
-        if current_status in ("failed", "partial_success"):
+        if current_status == ExecutionJobStatus.FAILED:
             try:
                 await websocket.send_text(json.dumps({
                     "event": "error",
                     "data": {
-                        "message": f"Job ended with status: {current_status}",
+                        "message": f"Job failed (status: {current_status})",
                         "job_id": job_id,
                     },
                 }))
@@ -187,7 +190,7 @@ async def deep_research_ws(
         # Redis cache miss — fall back to MongoDB
         mongo = websocket.app.state.mongo
         doc = await mongo[settings.mongo_db_name]["Deep_Research_Jobs"].find_one(
-            {"job_id": job_id}, {"tenant_id": 1}
+            {"_id": ObjectId(job_id)}, {"tenant_id": 1}
         )
         stored_tenant = doc["tenant_id"] if doc else None
 

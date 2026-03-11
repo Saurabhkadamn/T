@@ -50,7 +50,10 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from langchain_core.runnables import RunnableConfig
 
+from bson import ObjectId
+
 from app.config import settings
+from app.enums import ExecutionJobStatus
 from app.tracing import node_span
 from graphs.execution.state import Citation, ExecutionState
 
@@ -160,7 +163,7 @@ async def _upsert_report(
     llm_model: str = ""
     try:
         job_doc = await db["Deep_Research_Jobs"].find_one(
-            {"job_id": state["job_id"], "tenant_id": state["tenant_id"]},
+            {"_id": ObjectId(state["job_id"]), "tenant_id": state["tenant_id"]},
             projection={"llm_model": 1, "_id": 0},
         )
         if job_doc:
@@ -186,14 +189,14 @@ async def _upsert_report(
 
     doc = {
         "report_id": state["report_id"],
-        "job_id": state["job_id"],
+        "job_id": ObjectId(state["job_id"]),
         "tenant_id": state["tenant_id"],          # MUST be present
         "user_id": state["user_id"],
         "topic": state.get("topic", ""),
         "refined_topic": state.get("refined_topic", ""),
         "llm_model": llm_model,
         "s3_key": s3_key,
-        "status": "completed",
+        "status": ExecutionJobStatus.COMPLETED,
         "executed_at": now_iso,
         "section_count": len(state.get("sections") or []),
         "citation_count": len(trimmed_citations),
@@ -220,7 +223,7 @@ async def _update_job_status(
     db = mongo_client[settings.mongo_db_name]
     coll = db["Deep_Research_Jobs"]
     await coll.update_one(
-        {"job_id": job_id, "tenant_id": tenant_id},
+        {"_id": ObjectId(job_id), "tenant_id": tenant_id},
         {
             "$set": {
                 "status": status,
@@ -257,7 +260,7 @@ async def _publish_redis_status(
 
             # Publish to pub/sub so WebSocket subscribers get notified.
             event = json.dumps({
-                "type": "completed" if status == "completed" else "error",
+                "type": "completed" if status == ExecutionJobStatus.COMPLETED else "error",
                 "status": status,
                 "progress": progress,
                 "updated_at": now_iso,
@@ -313,7 +316,7 @@ async def exporter(
         await _upsert_report(mongo_client, state, final_s3_key, now_iso)
         logger.info("exporter: deep_research_reports upserted (job_id=%s)", job_id)
 
-        final_status = "completed" if not errors else "partial_success"
+        final_status = ExecutionJobStatus.COMPLETED if not errors else ExecutionJobStatus.FAILED
         await _update_job_status(
             mongo_client, job_id, tenant_id, final_status, now_iso
         )
@@ -327,7 +330,7 @@ async def exporter(
             "exporter: MongoDB write failed — %s (job_id=%s)", exc, job_id
         )
         errors.append(f"MongoDB write error: {exc}")
-        final_status = "partial_success"
+        final_status = ExecutionJobStatus.FAILED
 
     # ------------------------------------------------------------------
     # 5. Redis status update + pub/sub

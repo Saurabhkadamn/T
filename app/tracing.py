@@ -51,7 +51,8 @@ logger = logging.getLogger(__name__)
 # Langfuse singleton
 # ---------------------------------------------------------------------------
 
-_langfuse: Any = None  # Langfuse client singleton
+_langfuse: Any = None          # Langfuse client singleton
+_tracer_provider: Any = None   # OTEL TracerProvider singleton
 
 
 def init_langfuse() -> None:
@@ -195,7 +196,7 @@ def init_otel() -> None:
 
         exporter = OTLPSpanExporter(
             endpoint=settings.otel_collector_endpoint,
-            insecure=True,
+            insecure=settings.otel_insecure,
         )
         provider = TracerProvider(
             resource=resource,
@@ -203,6 +204,9 @@ def init_otel() -> None:
         )
         provider.add_span_processor(BatchSpanProcessor(exporter))
         trace.set_tracer_provider(provider)
+
+        global _tracer_provider
+        _tracer_provider = provider
 
         # Log bridge — injects otelTraceID + otelSpanID into every Python log record
         LoggingInstrumentor().instrument(set_logging_format=True)
@@ -220,6 +224,22 @@ def init_otel() -> None:
         )
     except Exception as exc:
         logger.warning("tracing: OTEL init failed — distributed tracing disabled. Reason: %s", exc)
+
+
+def shutdown_otel() -> None:
+    """Flush and shut down the OTEL TracerProvider. Call before process exit.
+
+    Forces the BatchSpanProcessor to export any queued spans (up to 5 s),
+    then shuts down the provider cleanly.  No-op when OTEL was not initialised.
+    """
+    if _tracer_provider is None:
+        return
+    try:
+        _tracer_provider.force_flush(timeout_millis=5_000)
+        _tracer_provider.shutdown()
+        logger.info("tracing: OTEL TracerProvider shut down cleanly")
+    except Exception as exc:
+        logger.warning("tracing: OTEL shutdown error — %s", exc)
 
 
 def get_tracer(name: str = "kadal") -> Any:

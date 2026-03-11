@@ -16,15 +16,15 @@ Exit codes
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import sys
 
-logging.basicConfig(
-    level=logging.INFO,
-    # otelTraceID / otelSpanID injected by LoggingInstrumentor when OTEL is enabled
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
-)
+from app.logging_utils import setup_json_logging
+
+# JSON logging must be configured before any other imports that use logging
+setup_json_logging("kadal-deepresearch-worker")
+
+import logging  # noqa: E402 — after setup_json_logging
 
 logger = logging.getLogger(__name__)
 
@@ -39,16 +39,29 @@ async def _main() -> None:
     # set before get_tracer() / @node_span calls inside executor/nodes.
     # Set OTEL_SERVICE_NAME=kadal-deepresearch-worker in the EKS Job env to
     # distinguish worker spans from API spans in the collector.
-    from app.tracing import init_otel
-    init_otel()
+    from app.tracing import get_langfuse, init_langfuse, init_otel, shutdown_otel
+
+    init_otel()       # Must be before any graph/node code
+    init_langfuse()   # Bug 1 fix: worker needs its own Langfuse init
 
     logger.info("worker: starting job_id=%s", job_id)
 
     from worker.executor import run
 
-    await run(job_id)
+    try:
+        await run(job_id)
+        logger.info("worker: finished job_id=%s", job_id)
+    finally:
+        # Bug 3 fix: flush Langfuse buffer before EKS Job process exits
+        try:
+            lf = get_langfuse()
+            if lf is not None:
+                lf.flush()
+        except Exception as exc:
+            logger.warning("worker: Langfuse flush error — %s", exc)
 
-    logger.info("worker: finished job_id=%s", job_id)
+        # Gap 5 fix: flush OTEL BatchSpanProcessor queue before exit
+        shutdown_otel()
 
 
 if __name__ == "__main__":

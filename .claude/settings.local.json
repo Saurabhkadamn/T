@@ -12,7 +12,10 @@
       "Bash(git:*)",
       "Bash(grep:*)",
       "WebFetch(domain:pypi.org)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(find ./graphs/planning/nodes -type f -name \"*.py\" 2>/dev/null | sort)",
+      "Bash(find ./graphs/execution/nodes -type f -name \"*.py\" 2>/dev/null | sort)",
+      "WebFetch(domain:opentelemetry-python.readthedocs.io)"
     ]
   }
 }

@@ -32,10 +32,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, status
 from motor.motor_asyncio import AsyncIOMotorClient
 from redis.asyncio import Redis
@@ -43,6 +43,7 @@ from redis.asyncio import Redis
 from app.api.models import PlanRequest, PlanResponse
 from app.config import settings
 from app.dependencies import TokenUser, get_current_user, get_mongo, get_redis
+from app.enums import PlanningJobStatus
 from app.tracing import get_callback_handler, inject_trace_carrier
 from graphs.planning.graph import planning_graph
 from graphs.planning.state import PlanningState
@@ -164,9 +165,9 @@ async def _save_job_doc(
     graph_status = result.get("status", "unknown")
 
     if graph_status == "awaiting_approval":
-        job_status = "plans_ready"
+        job_status = PlanningJobStatus.PLAN_READY
     elif graph_status == "needs_clarification":
-        job_status = "needs_clarification"
+        job_status = PlanningJobStatus.NEED_CLARIFICATION
     else:
         job_status = graph_status
 
@@ -175,7 +176,6 @@ async def _save_job_doc(
     created_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     job_doc = {
-        "job_id": job_id,
         "report_id": (existing_doc or {}).get("report_id"),
         "tenant_id": tenant_id,
         "user_id": user_id,
@@ -224,7 +224,7 @@ async def _save_job_doc(
 
     db = mongo[settings.mongo_db_name]
     await db["Deep_Research_Jobs"].replace_one(
-        {"job_id": job_id, "tenant_id": tenant_id},
+        {"_id": ObjectId(job_id), "tenant_id": tenant_id},
         job_doc,
         upsert=True,
     )
@@ -273,7 +273,20 @@ async def plan(
 
     # ── Build PlanningState ────────────────────────────────────────────────
     if mode == "mode1":
-        job_id = str(uuid.uuid4())
+        oid = ObjectId()
+        job_id = str(oid)
+
+        # Pre-insert minimal document to reserve the ObjectId immediately
+        _pre_insert_ts = datetime.now(timezone.utc).isoformat()
+        await db["Deep_Research_Jobs"].insert_one({
+            "_id": oid,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "topic": body.topic,
+            "status": PlanningJobStatus.PLAN_INITIATED,
+            "created_at": _pre_insert_ts,
+            "updated_at": _pre_insert_ts,
+        })
 
         # Map objects → uploaded_files (state expects list with object_id, filename, mime_type)
         uploaded_files = [
@@ -326,7 +339,7 @@ async def plan(
         # Modes 2 & 3: load saved state from MongoDB
         job_id = body.job_id
         existing_doc = await db["Deep_Research_Jobs"].find_one(
-            {"job_id": job_id, "tenant_id": tenant_id},
+            {"_id": ObjectId(job_id), "tenant_id": tenant_id},
             {"_id": 0},
         )
         if existing_doc is None:
@@ -343,7 +356,7 @@ async def plan(
             )
 
         if mode == "mode2":
-            if existing_doc.get("status") != "needs_clarification":
+            if existing_doc.get("status") != PlanningJobStatus.NEED_CLARIFICATION:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
@@ -366,7 +379,7 @@ async def plan(
                 # Max revisions reached — return current plan, client shows approve/cancel only
                 return PlanResponse(
                     job_id=job_id,
-                    status="awaiting_approval",
+                    status=PlanningJobStatus.PLAN_READY,
                     needs_clarification=False,
                     refined_topic=saved_state.get("refined_topic"),
                     analysis={
@@ -386,6 +399,15 @@ async def plan(
             initial_state = {**saved_state}  # type: ignore[assignment]
             initial_state["plan_feedback"] = body.plan_feedback
             initial_state["plan_revision_count"] = revision_count + 1
+
+            # Signal that a revision is in-flight
+            await db["Deep_Research_Jobs"].update_one(
+                {"_id": ObjectId(job_id), "tenant_id": tenant_id},
+                {"$set": {
+                    "status": PlanningJobStatus.PLAN_EDIT_REQUESTED,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }},
+            )
 
     # ── Consume rate-limit slot (before graph — Mode 1 only) ───────────────
     # Modes 2 & 3 resume an existing job_id so they don't create new entries.

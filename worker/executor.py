@@ -31,7 +31,10 @@ from datetime import datetime, timezone
 import redis.asyncio as aioredis
 from motor.motor_asyncio import AsyncIOMotorClient
 
+from bson import ObjectId
+
 from app.config import settings
+from app.enums import ExecutionJobStatus
 from app.tracing import extract_trace_context, get_callback_handler, get_tracer
 from graphs.execution.graph import build_execution_graph
 from graphs.execution.nodes.exporter import close_exporter_clients
@@ -73,7 +76,7 @@ async def run(job_id: str) -> None:
         )
         db = mongo_client[settings.mongo_db_name]
 
-        job_doc = await db["Deep_Research_Jobs"].find_one({"job_id": job_id})
+        job_doc = await db["Deep_Research_Jobs"].find_one({"_id": ObjectId(job_id)})
         if job_doc is None:
             raise ValueError(f"Job {job_id!r} not found in deep_research_jobs")
 
@@ -178,9 +181,9 @@ async def run(job_id: str) -> None:
         # Mark job as running in MongoDB
         started_at = _now_iso()
         await db["Deep_Research_Jobs"].update_one(
-            {"job_id": job_id, "tenant_id": tenant_id},
+            {"_id": ObjectId(job_id), "tenant_id": tenant_id},
             {"$set": {
-                "status": "research",
+                "status": ExecutionJobStatus.RUNNING,
                 "started_at": started_at,
                 "updated_at": started_at,
             }},
@@ -287,8 +290,8 @@ async def run(job_id: str) -> None:
 
         # Update MongoDB job status to completed
         await db["Deep_Research_Jobs"].update_one(
-            {"job_id": job_id, "tenant_id": tenant_id},
-            {"$set": {"status": "completed", "progress": 100, "updated_at": _now_iso()}},
+            {"_id": ObjectId(job_id), "tenant_id": tenant_id},
+            {"$set": {"status": ExecutionJobStatus.COMPLETED, "progress": 100, "updated_at": _now_iso()}},
         )
 
         # Update daily rate-limit hash: mark job as completed (not failed → counts toward limit)
@@ -312,14 +315,14 @@ async def run(job_id: str) -> None:
         if mongo_client is not None:
             try:
                 db = mongo_client[settings.mongo_db_name]
-                update_filter: dict = {"job_id": job_id}
+                update_filter: dict = {"_id": ObjectId(job_id)}
                 if tenant_id:
                     update_filter["tenant_id"] = tenant_id
                 await db["Deep_Research_Jobs"].update_one(
                     update_filter,
                     {
                         "$set": {
-                            "status": "failed",
+                            "status": ExecutionJobStatus.FAILED,
                             "error": str(exc),
                             "updated_at": _now_iso(),
                         }

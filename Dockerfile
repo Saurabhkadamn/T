@@ -2,14 +2,17 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Create non-root user before any COPY so --chown works without a separate chown layer
+RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+
+# Install deps as root (wheels go to /usr/local/lib — outside /app)
+# This layer is cached until requirements.txt changes
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+# Copy app code with correct ownership in a single layer (avoids duplicate chown layer)
+COPY --chown=appuser:appgroup . .
 
-COPY . .
-
-RUN chown -R appuser:appgroup /app
 USER appuser
 
 EXPOSE 8000

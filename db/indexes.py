@@ -10,10 +10,6 @@ Usage:
 
 Collections
 -----------
-background_jobs (existing — add DEEP_RESEARCH type support):
-  - {type: 1, status: 1}
-  - {ref_id: 1}
-
 deep_research_jobs (new):
   - {job_id: 1}           UNIQUE
   - {tenant_id: 1, user_id: 1}
@@ -48,13 +44,7 @@ logger = logging.getLogger(__name__)
 # Index specifications
 # ---------------------------------------------------------------------------
 
-_BACKGROUND_JOBS_INDEXES = [
-    IndexModel([("job_type", ASCENDING), ("job_status", ASCENDING)], name="job_type_job_status"),
-    IndexModel([("job_id", ASCENDING)], name="job_id"),
-]
-
 _DEEP_RESEARCH_JOBS_INDEXES = [
-    IndexModel([("job_id", ASCENDING)], unique=True, name="job_id_unique"),
     IndexModel(
         [("tenant_id", ASCENDING), ("user_id", ASCENDING)],
         name="tenant_user",
@@ -94,7 +84,6 @@ async def setup_all_indexes(mongo_uri: str | None = None) -> None:
     db = client[settings.mongo_db_name]
 
     tasks = [
-        _apply_indexes(db, "Background_Jobs", _BACKGROUND_JOBS_INDEXES),
         _apply_indexes(db, "Deep_Research_Jobs", _DEEP_RESEARCH_JOBS_INDEXES),
         _apply_indexes(db, "Deep_Research_Reports", _DEEP_RESEARCH_REPORTS_INDEXES),
         # Langgraph_Checkpoints: AsyncMongoDBSaver manages its own indexes.
@@ -104,7 +93,6 @@ async def setup_all_indexes(mongo_uri: str | None = None) -> None:
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for name, result in zip(
         [
-            "Background_Jobs",
             "Deep_Research_Jobs",
             "Deep_Research_Reports",
             "Langgraph_Checkpoints",

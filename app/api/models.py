@@ -65,9 +65,10 @@ class PlanRequest(BaseModel):
     # Mode 3: human reviewer's plain-text feedback on the plan
     plan_feedback: Optional[str] = Field(default=None, max_length=5000)
     # Re-invoke token — None on first call; echoed back by client on Modes 2 & 3
+    # Format: MongoDB ObjectId (24-char lowercase hex)
     job_id: Optional[str] = Field(
         default=None,
-        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        pattern=r"^[0-9a-f]{24}$",
     )
 
     @model_validator(mode="after")
@@ -117,7 +118,7 @@ class RunRequest(BaseModel):
 class RunResponse(BaseModel):
     job_id: str
     report_id: Optional[str] = None
-    status: Literal["research_queued", "cancelled"] = "research_queued"
+    status: Literal["QUEUED", "PLAN_CANCELED"] = "QUEUED"
 
 
 # ---------------------------------------------------------------------------
@@ -127,10 +128,14 @@ class RunResponse(BaseModel):
 class StatusResponse(BaseModel):
     job_id: str
     status: Literal[
-        "plans_ready", "research_queued", "research", "completed",
-        "failed", "partial_success", "unknown",
-        # graph-internal statuses that may be surfaced
+        # DB planning statuses
+        "PLAN_INITIATED", "NEED_CLARIFICATION", "PLAN_READY",
+        "PLAN_EDIT_REQUESTED", "PLAN_CANCELED",
+        # DB execution statuses
+        "QUEUED", "RUNNING", "COMPLETED", "FAILED",
+        # streaming-only statuses (worker → Redis → client, not stored in MongoDB)
         "initializing", "researching", "fusing", "writing", "reviewing", "exporting",
+        "unknown",
     ]
     progress: int = 0
     section: Optional[str] = None      # current section being researched
@@ -142,7 +147,7 @@ class StatusResponse(BaseModel):
 # GET /api/deepresearch/reports[/{report_id}]
 # ---------------------------------------------------------------------------
 
-_ReportStatus = Literal["research_queued", "research", "completed", "failed", "partial_success", "unknown"]
+_ReportStatus = Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED", "unknown"]
 
 
 class ReportListItem(BaseModel):
