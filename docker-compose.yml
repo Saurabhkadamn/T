@@ -53,6 +53,16 @@ services:
         condition: service_healthy
     command: python -m worker.main
 
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: kadal_redisinsight
+    restart: unless-stopped
+    ports:
+      - "5540:5540"
+    depends_on:
+      redis:
+        condition: service_healthy
+
   dispatcher:
     profiles: ["dispatcher"]
     build: .

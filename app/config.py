@@ -66,7 +66,6 @@ class LoopLimits(BaseModel):
     """
 
     clarification_max: int = 3
-    plan_refinement_max: int = 3
     plan_revision_max: int = 3          # max user plan rejections before forcing restart
     plan_self_review_max: int = 2
     supervisor_reflection_max: int = 2

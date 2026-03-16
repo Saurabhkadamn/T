@@ -159,8 +159,7 @@ context window (surface ≈ 19K tokens, intermediate ≈ 44K tokens, in-depth �
 | Field | Default | Enforced by |
 |-------|---------|-------------|
 | `clarification_max` | 3 | `graph.py` `_route_after_query_analyzer` |
-| `plan_refinement_max` | 3 | `plan.py` before graph invocation |
-| `plan_revision_max` | 3 | `graph.py` `_route_entry` |
+| `plan_revision_max` | 3 | `plan.py:379` (HTTP guard) + `graph.py:73` (`_route_entry`) |
 | `plan_self_review_max` | 2 | (reserved — not yet wired) |
 | `supervisor_reflection_max` | 2 | `supervisor.py` `reflection_count` guard |
 
