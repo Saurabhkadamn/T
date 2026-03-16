@@ -52,3 +52,6 @@ opentelemetry-instrumentation-httpx==0.61b0
 opentelemetry-instrumentation-pymongo==0.61b0
 opentelemetry-instrumentation-redis==0.61b0
 opentelemetry-instrumentation-logging==0.61b0
+
+# ── Kubernetes client ───────────────────────────────────────────────────────
+kubernetes==29.0.0

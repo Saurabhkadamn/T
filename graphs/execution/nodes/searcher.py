@@ -85,7 +85,7 @@ def _file_results(
                 title=f"Uploaded file: {object_id[:12]}… — {title_hint}",
                 content=content,
                 published_at="",             # upload date not tracked here
-                score=1.0,                   # highest trust, score not used for ranking
+                score=0.8,                   # high trust but allows relevant web results to compete at cap
             )
         )
     return results
@@ -109,16 +109,22 @@ def _deduplicate(
     return unique
 
 
-async def _web_search(query: str, n: int) -> list[RawSearchResult]:
-    """Tavily primary; Serper fallback if Tavily returns nothing."""
-    results = await tavily_search(query, max_results=n)
-    if not results:
-        logger.info(
-            "searcher: Tavily returned 0 results — falling back to Serper (query=%r)",
-            query,
-        )
-        results = await serper_search(query, max_results=n)
-    return results
+async def _web_search(query: str, n: int, *, use_tavily: bool = False) -> list[RawSearchResult]:
+    """Execute web search.
+
+    use_tavily=True  → Tavily (primary) with Serper as fallback on 0 results.
+    use_tavily=False → Serper only (default when Tavily not in user's tools).
+    """
+    if use_tavily:
+        results = await tavily_search(query, max_results=n)
+        if not results:
+            logger.info(
+                "searcher: Tavily returned 0 results — falling back to Serper (query=%r)",
+                query,
+            )
+            results = await serper_search(query, max_results=n)
+        return results
+    return await serper_search(query, max_results=n)
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +144,8 @@ async def searcher(
     search_queries: list[str] = state.get("search_queries") or []
     search_strategy: str = state.get("search_strategy", "web")
     tenant_id: str = state.get("tenant_id", "")
+    object_ids: list[str] = state.get("object_ids") or []
+    bearer_token: str = state.get("bearer_token", "")
     max_sources: int = state.get("max_sources", 3)
     file_contents: dict[str, str] = state.get("file_contents") or {}
     existing_results: list[RawSearchResult] = state.get("raw_search_results") or []
@@ -158,9 +166,14 @@ async def searcher(
     # ------------------------------------------------------------------
     tasks: list[asyncio.Task] = []
 
+    use_tavily = "tavily" in strategies
+    has_web = "web" in strategies or use_tavily  # "tavily" alone also triggers web search
+
     for query in search_queries:
-        if "web" in strategies:
-            tasks.append(asyncio.create_task(_web_search(query, _RESULTS_PER_QUERY)))
+        if has_web:
+            tasks.append(asyncio.create_task(
+                _web_search(query, _RESULTS_PER_QUERY, use_tavily=use_tavily)
+            ))
         if "arxiv" in strategies:
             tasks.append(
                 asyncio.create_task(arxiv_search(query, max_results=_RESULTS_PER_QUERY))
@@ -168,7 +181,13 @@ async def searcher(
         if "content_lake" in strategies and tenant_id:
             tasks.append(
                 asyncio.create_task(
-                    content_lake_search(query, tenant_id, max_results=_RESULTS_PER_QUERY)
+                    content_lake_search(
+                        query,
+                        tenant_id,
+                        object_ids=object_ids,
+                        bearer_token=bearer_token,
+                        max_results=_RESULTS_PER_QUERY,
+                    )
                 )
             )
 

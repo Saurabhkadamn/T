@@ -67,6 +67,10 @@ from langgraph.types import Send
 from app.config import settings
 from app.llm_factory import get_llm
 from app.tracing import node_span
+from graphs.execution.prompts.supervisor import (
+    _REFLECTION_SYSTEM_PROMPT,
+    _REFLECTION_USER_TEMPLATE,
+)
 from graphs.execution.state import (
     CompressedFinding,
     ExecutionState,
@@ -75,60 +79,6 @@ from graphs.execution.state import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Prompts
-# ---------------------------------------------------------------------------
-
-_REFLECTION_SYSTEM_PROMPT = """\
-You are a senior research director reviewing an AI-generated multi-source \
-research report that is currently in progress.
-
-You have access to compressed research findings per section and the completion \
-status of each section.  Your task is to identify knowledge gaps — topics that \
-are missing or insufficiently covered — that would meaningfully improve the \
-final report.
-
-Output a single JSON object — no markdown fences, no commentary.
-"""
-
-_REFLECTION_USER_TEMPLATE = """\
-## Research Topic
-{refined_topic}
-
-## Planned Sections
-{sections_list}
-
-## Completed Research Findings
-{findings_text}
-
-## Failed or Partial Sections
-{failed_sections}
-
----
-
-Identify knowledge gaps in the current findings.
-
-A knowledge gap is a topic or sub-topic that:
-1. Is clearly relevant to the research topic.
-2. Is missing or only superficially mentioned in the current findings.
-3. Could realistically be addressed with additional targeted web / arxiv searches.
-
-Return:
-{{
-  "knowledge_gaps": [
-    "<gap 1: specific, 1-2 sentences describing what is missing and why it matters>",
-    "..."
-  ]
-}}
-
-Constraints:
-- Maximum 3 gaps.  Prioritise the most impactful omissions.
-- Return an empty list [] if the current findings are comprehensive.
-- Do NOT invent gaps — only report genuine absences visible in the findings.
-- Each gap description must be specific enough to guide a targeted search query.
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -149,8 +99,14 @@ def _parse_reflection(raw: str) -> list[str]:
     if text.startswith("```"):
         text = text.split("\n", 1)[-1]
         text = text.rsplit("```", 1)[0].strip()
-    parsed = json.loads(text)
-    return parsed.get("knowledge_gaps") or []
+    try:
+        parsed = json.loads(text)
+        return parsed.get("knowledge_gaps") or []
+    except json.JSONDecodeError as exc:
+        logger.error(
+            "supervisor: failed to parse reflection JSON — %s | raw=%r", exc, raw[:200]
+        )
+        return []
 
 
 def _format_sections_list(sections: list[dict]) -> str:
@@ -198,12 +154,16 @@ def _build_initial_section_state(
     All field access uses .get() with safe defaults.
     """
     max_sources = state["max_sources_per_section"]
+    attachments = state.get("attachments") or []
+    object_ids = [a["object_id"] for a in attachments if a.get("object_id")]
     return {
         "section_id": section.get("section_id") or str(uuid.uuid4()),
         "section_title": section.get("title", ""),
         "section_description": section.get("description", ""),
         "search_strategy": section.get("search_strategy", "web"),
         "tenant_id": state["tenant_id"],
+        "object_ids": object_ids,
+        "bearer_token": "",
         "max_search_iterations": state["max_search_iterations"],
         "max_sources": max_sources,
         "compression_target_tokens": _infer_compression_target(max_sources),
@@ -231,15 +191,25 @@ def _build_gap_section_state(
     - max_search_iterations reduced by 1 (minimum 1) — they are focused,
       not exhaustive.
     - max_sources halved (minimum 2) — fewer sources, higher precision.
-    - search_strategy "web,arxiv" — broadest coverage for unknown gaps.
+    - search_strategy derived from state["tools_enabled"] — respects user
+      tool preferences; "files" excluded as they don't help with gaps.
     """
     max_sources = max(2, state["max_sources_per_section"] // 2)
+    attachments = state.get("attachments") or []
+    object_ids = [a["object_id"] for a in attachments if a.get("object_id")]
+    tools_enabled = state.get("tools_enabled") or {}
+    gap_strategy = ",".join(
+        tool for tool, enabled in tools_enabled.items()
+        if enabled and tool != "files"
+    )
     return {
         "section_id": f"gap-{uuid.uuid4().hex[:8]}",
         "section_title": f"Gap Fill-in {index + 1}",
         "section_description": gap,
-        "search_strategy": "web,arxiv",
+        "search_strategy": gap_strategy or "web",
         "tenant_id": state["tenant_id"],
+        "object_ids": object_ids,
+        "bearer_token": "",
         "max_search_iterations": max(1, state["max_search_iterations"] - 1),
         "max_sources": max_sources,
         "compression_target_tokens": _infer_compression_target(max_sources),
@@ -344,7 +314,6 @@ async def supervisor(state: ExecutionState, config: RunnableConfig | None = None
         response = await asyncio.wait_for(
             llm.ainvoke(messages, config=config), timeout=settings.llm_timeout_seconds
         )
-        knowledge_gaps = _parse_reflection(response.content)
     except asyncio.TimeoutError:
         logger.error(
             "supervisor: reflection LLM timed out after %ds (job_id=%s)",
@@ -357,6 +326,9 @@ async def supervisor(state: ExecutionState, config: RunnableConfig | None = None
             "supervisor: reflection LLM call failed — %s (job_id=%s)", exc, job_id
         )
         knowledge_gaps = []
+    else:
+        # LLM succeeded — parse separately so JSON errors don't blame the LLM.
+        knowledge_gaps = _parse_reflection(response.content)
 
     logger.info(
         "supervisor: reflection found %d gap(s) (job_id=%s): %s",

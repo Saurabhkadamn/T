@@ -54,9 +54,16 @@ class ToolsEnabled(TypedDict):
     """Which search integrations are active for this research job.
 
     Typed struct (not dict[str, bool]) so mypy can catch missing keys.
-    Mirrors the four SourceType values: web, arxiv, content_lake, files.
+
+    web:          generic web search — always True; uses Serper by default.
+    tavily:       Tavily premium web search — when True, Tavily is primary and
+                  Serper is the fallback.  When False, Serper is used directly.
+    arxiv:        arXiv academic paper search.
+    content_lake: internal content lake API (tenant-scoped).
+    files:        user-uploaded files (pre-loaded from Redis at worker start).
     """
     web: bool
+    tavily: bool
     arxiv: bool
     content_lake: bool
     files: bool
@@ -247,6 +254,8 @@ class SectionResearchState(TypedDict):
     # Config  (set by Send, immutable inside sub-graph)
     # ------------------------------------------------------------------
     tenant_id: str                  # propagated from ExecutionState for content_lake calls
+    object_ids: list[str]           # object_ids from attachments — content_lake search filter
+    bearer_token: str               # auth token; "" until token fetching is implemented
     max_search_iterations: int
     max_sources: int
     compression_target_tokens: int  # depth-dependent budget: 2500 / 5000 / 8000

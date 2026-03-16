@@ -44,6 +44,10 @@ from langchain_core.runnables import RunnableConfig
 
 from app.config import settings
 from app.llm_factory import get_llm
+from graphs.planning.prompts.context_builder import (
+    _SYSTEM_PROMPT,
+    _USER_PROMPT_TEMPLATE,
+)
 from graphs.planning.state import ChatMessage, PlanningState
 
 logger = logging.getLogger(__name__)
@@ -55,42 +59,6 @@ logger = logging.getLogger(__name__)
 
 def _file_key(object_id: str) -> str:
     return f"file:{object_id}:content"
-
-
-# ---------------------------------------------------------------------------
-# LLM prompt
-# ---------------------------------------------------------------------------
-
-_SYSTEM_PROMPT = """\
-You are a context summariser for Kadal AI's deep research system.
-Your job is to read a user's research topic, their recent conversation history,
-and any uploaded file excerpts, then produce a single cohesive prose summary
-(the "context brief") that will be passed to the research planning pipeline.
-
-The context brief must:
-- Explain what the user is trying to research and why (based on conversation).
-- Highlight any constraints, preferences, or domain knowledge from the conversation.
-- Summarise key facts or themes from uploaded files that are relevant to the topic.
-- Be written in third-person neutral style, 300-500 words.
-- NOT include clarification questions — only summarise what is already known.
-
-Output plain prose only — no markdown headers, no bullet lists.
-"""
-
-_USER_PROMPT_TEMPLATE = """\
-## Research Topic
-{topic}
-
-## Recent Conversation History ({history_len} turns)
-{chat_history_text}
-
-## Uploaded File Excerpts
-{file_summary_text}
-
----
-
-Write the context brief now.
-"""
 
 
 # ---------------------------------------------------------------------------

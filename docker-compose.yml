@@ -53,5 +53,20 @@ services:
         condition: service_healthy
     command: python -m worker.main
 
+  dispatcher:
+    profiles: ["dispatcher"]
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_HOST=redis
+      - OTEL_SERVICE_NAME=kadal-deepresearch-dispatcher
+      - DISPATCHER__WORKER_IMAGE=${WORKER_IMAGE:-}
+      - DISPATCHER__DRY_RUN=true          # safe default for local dev
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: python -m worker.dispatcher_main
+
 volumes:
   redis_data:

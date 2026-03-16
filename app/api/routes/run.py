@@ -119,8 +119,16 @@ async def run(
     # ── Handle cancel action ───────────────────────────────────────────────
     if body.action == "cancel":
         try:
-            await db["Deep_Research_Jobs"].update_one(
-                {"_id": ObjectId(body.job_id), "tenant_id": tenant_id},
+            cancel_result = await db["Deep_Research_Jobs"].update_one(
+                {
+                    "_id": ObjectId(body.job_id),
+                    "tenant_id": tenant_id,
+                    "status": {"$in": [
+                        PlanningJobStatus.PLAN_READY,
+                        PlanningJobStatus.NEED_CLARIFICATION,
+                        PlanningJobStatus.PLAN_EDIT_REQUESTED,
+                    ]},
+                },
                 {"$set": {"status": PlanningJobStatus.PLAN_CANCELED, "updated_at": datetime.now(timezone.utc).isoformat()}},
             )
         except Exception as exc:
@@ -129,17 +137,13 @@ async def run(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to cancel job: {exc}",
             ) from exc
+        if cancel_result.modified_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Job cannot be cancelled in its current state",
+            )
         logger.info("run: cancelled job_id=%s tenant_id=%s", body.job_id, tenant_id)
         return RunResponse(job_id=body.job_id, status=PlanningJobStatus.PLAN_CANCELED)
-
-    if job_doc.get("status") != PlanningJobStatus.PLAN_READY:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"Job {body.job_id!r} is not in PLAN_READY state "
-                f"(current: {job_doc.get('status')!r})"
-            ),
-        )
 
     # ── Generate report_id ─────────────────────────────────────────────────
     report_id = str(uuid.uuid4())
@@ -148,10 +152,14 @@ async def run(
     # ── Inject OTEL carrier so Worker can continue the same trace ─────────
     otel_carrier = inject_trace_carrier()
 
-    # ── Update deep_research_jobs ──────────────────────────────────────────
+    # ── Update deep_research_jobs (atomic: only transitions from PLAN_READY) ──
     try:
-        await db["Deep_Research_Jobs"].update_one(
-            {"_id": ObjectId(body.job_id), "tenant_id": tenant_id},
+        approve_result = await db["Deep_Research_Jobs"].update_one(
+            {
+                "_id": ObjectId(body.job_id),
+                "tenant_id": tenant_id,
+                "status": PlanningJobStatus.PLAN_READY,   # atomic guard
+            },
             {"$set": {
                 "status": ExecutionJobStatus.QUEUED,
                 "report_id": report_id,
@@ -166,6 +174,11 @@ async def run(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update job: {exc}",
         ) from exc
+    if approve_result.modified_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Job {body.job_id!r} could not be approved — status may have changed",
+        )
 
     # ── Insert deep_research_reports ──────────────────────────────────────
     plan: dict = job_doc.get("plan") or {}
@@ -195,31 +208,63 @@ async def run(
     except Exception as exc:
         logger.exception("run: failed to insert deep_research_reports")
         # Best-effort rollback of job status update
-        await db["Deep_Research_Jobs"].update_one(
-            {"_id": ObjectId(body.job_id), "tenant_id": tenant_id},
-            {"$set": {"status": PlanningJobStatus.PLAN_READY, "report_id": None, "updated_at": now_iso}},
-        )
+        try:
+            await db["Deep_Research_Jobs"].update_one(
+                {"_id": ObjectId(body.job_id), "tenant_id": tenant_id},
+                {"$set": {"status": PlanningJobStatus.PLAN_READY, "report_id": None, "updated_at": now_iso}},
+            )
+        except Exception as rollback_exc:
+            logger.error(
+                "run: CRITICAL — job_id=%s stuck in QUEUED with dangling report_id=%s — "
+                "manual cleanup required. rollback_error=%s",
+                body.job_id, report_id, rollback_exc,
+            )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create report record: {exc}",
         ) from exc
 
     # ── Set Redis status hash ──────────────────────────────────────────────
-    redis_key = f"job:{body.job_id}:status"
-    ttl = settings.redis_ttls.job_status_ttl_seconds
-    try:
-        await redis.hset(
-            redis_key,
-            mapping={
-                "status": ExecutionJobStatus.QUEUED,
-                "progress": "0",
-                "tenant_id": tenant_id,
-                "updated_at": now_iso,
-            },
-        )
-        await redis.expire(redis_key, ttl)
-    except Exception as exc:
-        logger.error("run: failed to set Redis status hash — %s", exc)
+    if redis is not None:
+        redis_key = f"job:{body.job_id}:status"
+        ttl = settings.redis_ttls.job_status_ttl_seconds
+        try:
+            await redis.hset(
+                redis_key,
+                mapping={
+                    "status": ExecutionJobStatus.QUEUED,
+                    "progress": "0",
+                    "tenant_id": tenant_id,
+                    "updated_at": now_iso,
+                },
+            )
+            await redis.expire(redis_key, ttl)
+        except Exception as exc:
+            logger.error("run: failed to set Redis status hash — %s", exc)
+
+    # ── Push to Redis Stream for dispatcher ────────────────────────────────
+    if redis is not None:
+        try:
+            msg_id = await redis.xadd(
+                settings.dispatcher.stream_name,
+                {"job_id": body.job_id, "tenant_id": tenant_id, "queued_at": now_iso},
+                maxlen=settings.dispatcher.stream_maxlen,
+                approximate=True,
+            )
+            await redis.set(
+                f"{settings.dispatcher.msgid_key_prefix}:{body.job_id}",
+                msg_id,
+                ex=settings.dispatcher.msgid_ttl_seconds,
+            )
+            logger.info(
+                "run: pushed job_id=%s to stream msg_id=%s", body.job_id, msg_id
+            )
+        except Exception as exc:
+            logger.error(
+                "run: XADD failed for job_id=%s — %s. "
+                "Job is stuck QUEUED; manual re-queue required.",
+                body.job_id, exc,
+            )
 
     logger.info(
         "run: queued job_id=%s report_id=%s tenant_id=%s",

@@ -104,9 +104,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> TokenUser:
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(
-                introspect_url + "?token=" + token,
+                introspect_url,
                 headers={"content-type": "application/x-www-form-urlencoded"},
-                data={},
+                data={"token": token},
             )
         payload = resp.json()
     except Exception as exc:
@@ -123,7 +123,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> TokenUser:
         )
 
     iss = payload.get("iss", "")
-    iss_tenant_id = iss.split("/")[-1] if iss else ""
+    iss_tenant_id = iss.rstrip("/").split("/")[-1] if iss else ""
+    if iss and not iss_tenant_id:
+        logger.warning("get_current_user: could not extract tenant from iss=%r", iss)
     client_id = payload.get("client_id", "")
     email = payload.get("email", "")
 
@@ -134,7 +136,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> TokenUser:
         username = payload.get("username") if user_id != "System" else "System"
         user_roles = payload.get("user_roles")
         roles = (
-            [user_roles[0]["role_name"].lower()] if user_roles else ["offline_access"]
+            [user_roles[0].get("role_name", "offline_access").lower()]
+            if user_roles and isinstance(user_roles[0], dict) and user_roles[0].get("role_name")
+            else ["offline_access"]
         )
         tenant_id = iss_tenant_id
 

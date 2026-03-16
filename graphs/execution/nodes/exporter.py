@@ -55,7 +55,7 @@ from bson import ObjectId
 from app.config import settings
 from app.enums import ExecutionJobStatus
 from app.tracing import node_span
-from graphs.execution.state import Citation, ExecutionState
+from graphs.execution.state import Citation, ExecutionState, SourceScore
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +140,7 @@ async def _upload_to_s3(
         )
         return presigned
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         presigned_url = await loop.run_in_executor(None, _sync_upload)
         return key, presigned_url
@@ -210,6 +210,40 @@ async def _upsert_report(
         {"$set": doc},
         upsert=True,
     )
+
+
+async def _bulk_upsert_source_scores(
+    mongo_client: AsyncIOMotorClient,
+    source_scores: list[SourceScore],
+) -> None:
+    """Upsert source score records into Source_Scores collection.
+
+    Uses $inc times_used + $push scores_history (capped at 20) to track
+    domain-level source reputation across jobs.  Every query includes tenant_id.
+    """
+    if not source_scores:
+        return
+    db = mongo_client[settings.mongo_db_name]
+    coll = db["Source_Scores"]
+    for score in source_scores:
+        try:
+            await coll.update_one(
+                {"url_hash": score["url_hash"], "tenant_id": score["tenant_id"]},
+                {
+                    "$inc": {"times_used": 1},
+                    "$push": {"scores_history": {"$each": [score], "$slice": -20}},
+                    "$set": {
+                        "last_seen_at": score.get("scored_at", ""),
+                        "domain": score.get("domain", ""),
+                    },
+                },
+                upsert=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "exporter: source_score upsert failed — %s (url_hash=%s)",
+                exc, score.get("url_hash", ""),
+            )
 
 
 async def _update_job_status(
@@ -316,7 +350,9 @@ async def exporter(
         await _upsert_report(mongo_client, state, final_s3_key, now_iso)
         logger.info("exporter: deep_research_reports upserted (job_id=%s)", job_id)
 
-        final_status = ExecutionJobStatus.COMPLETED if not errors else ExecutionJobStatus.FAILED
+        await _bulk_upsert_source_scores(mongo_client, state.get("source_scores") or [])
+
+        final_status = ExecutionJobStatus.COMPLETED if not errors else ExecutionJobStatus.PARTIAL_SUCCESS
         await _update_job_status(
             mongo_client, job_id, tenant_id, final_status, now_iso
         )
@@ -330,7 +366,7 @@ async def exporter(
             "exporter: MongoDB write failed — %s (job_id=%s)", exc, job_id
         )
         errors.append(f"MongoDB write error: {exc}")
-        final_status = ExecutionJobStatus.FAILED
+        final_status = ExecutionJobStatus.PARTIAL_SUCCESS
 
     # ------------------------------------------------------------------
     # 5. Redis status update + pub/sub

@@ -40,6 +40,10 @@ from langchain_core.runnables import RunnableConfig
 from app.config import settings
 from app.llm_factory import get_llm
 from app.tracing import node_span
+from graphs.execution.prompts.report_reviewer import (
+    _SYSTEM_PROMPT,
+    _USER_TEMPLATE,
+)
 from graphs.execution.state import ExecutionState
 
 logger = logging.getLogger(__name__)
@@ -49,44 +53,6 @@ logger = logging.getLogger(__name__)
 # Leave 200 K chars for system prompt + checklist + instructions + output.
 # In practice a large in-depth report is ~200 K chars so this never fires.
 _REVIEW_PROMPT_SAFETY_CHARS = 3_800_000
-
-
-# ---------------------------------------------------------------------------
-# Prompts
-# ---------------------------------------------------------------------------
-
-_SYSTEM_PROMPT = """\
-You are a quality control reviewer for AI-generated research reports.
-Evaluate the report against the provided checklist and return a structured verdict.
-Output a single JSON object — no markdown fences, no commentary.
-"""
-
-_USER_TEMPLATE = """\
-## Research Topic
-{topic}
-
-## Quality Checklist
-{checklist}
-
-## Report to Review
-{report_preview}
-
----
-
-Evaluate whether the report satisfies ALL checklist items.
-
-Return:
-{{
-  "verdict": "approved" | "needs_revision",
-  "feedback": null | "<specific, actionable feedback — list what needs fixing>"
-}}
-
-Rules:
-- "approved" only if ALL checklist items are met.
-- "needs_revision" must include concrete feedback (not vague comments).
-- Feedback must be specific enough for a writer to action it.
-- Do NOT request structural changes that cannot be made in one revision pass.
-"""
 
 
 # ---------------------------------------------------------------------------

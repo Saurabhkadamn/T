@@ -56,9 +56,13 @@ async def serper_search(
         logger.error("serper_search: request failed — %s (query=%r)", exc, query)
         return []
 
+    organic: list[dict] = data.get("organic") or []
+    total = len(organic)
     results: list[RawSearchResult] = []
-    for item in data.get("organic") or []:
-        content = item.get("snippet", "")
+    for i, item in enumerate(organic):
+        # Position-based score: rank 1 → 1.0, last rank → approaches 0.0.
+        # Formula: 1.0 - (i / total) gives an even spread across [0, 1).
+        score = round(1.0 - (i / max(total, 1)), 4)
         results.append(
             RawSearchResult(
                 result_id=str(uuid.uuid4()),
@@ -66,10 +70,9 @@ async def serper_search(
                 query=query,
                 url=item.get("link", ""),
                 title=item.get("title", ""),
-                content=content,
+                content=item.get("snippet", ""),
                 published_at=item.get("date", ""),
-                # Serper does not return a relevance score; use a neutral default.
-                score=0.5,
+                score=score,
             )
         )
 

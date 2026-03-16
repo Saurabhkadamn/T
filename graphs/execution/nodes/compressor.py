@@ -54,6 +54,10 @@ from langchain_core.runnables import RunnableConfig
 
 from app.config import settings
 from app.llm_factory import get_llm
+from graphs.execution.prompts.compressor import (
+    _SYSTEM_PROMPT,
+    _USER_TEMPLATE,
+)
 from graphs.execution.state import (
     Citation,
     RawSearchResult,
@@ -79,41 +83,6 @@ _TRUST_TIER: dict[SourceType, int] = {
     "arxiv": 3,
     "web": 4,
 }
-
-
-# ---------------------------------------------------------------------------
-# Prompts
-# ---------------------------------------------------------------------------
-
-_SYSTEM_PROMPT = """\
-You are a research analyst compressing raw search results into a concise, \
-factual summary for an AI-generated research report.
-
-Your task:
-1. Read all labelled sources below.
-2. Produce a dense, fact-rich summary that covers the most important findings.
-3. Attribute key claims to their source label (e.g. "According to [S2]…").
-4. Stay within the specified token budget by omitting redundant or \
-low-quality information.
-5. Do NOT include opinions, filler, or meta-commentary about the sources.
-6. Output ONLY the compressed summary — no preamble, no markdown headers.
-"""
-
-_USER_TEMPLATE = """\
-## Section to summarise
-**Title:** {section_title}
-**Description:** {section_description}
-
-## Token budget
-Target approximately {target_tokens} tokens in your response.
-
-## Sources
-{sources_block}
-
----
-
-Produce the compressed summary now.
-"""
 
 
 # ---------------------------------------------------------------------------

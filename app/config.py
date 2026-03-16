@@ -151,6 +151,42 @@ class RedisTTLConfig(BaseModel):
     rate_limit_run_ttl_seconds: int = 3_600     # 1 hr window
 
 
+class DispatcherConfig(BaseModel):
+    """Configuration for the Redis Streams dispatcher and Kubernetes Job spawner.
+
+    Env override syntax (double-underscore delimiter):
+        DISPATCHER__WORKER_IMAGE=123456789.dkr.ecr.ap-south-1.amazonaws.com/kadal-worker:latest
+        DISPATCHER__K8S_NAMESPACE=kadal-prod
+        DISPATCHER__MAX_CONCURRENT_JOBS=20
+    """
+
+    # Redis Streams
+    stream_name: str = "dr:jobs:stream"
+    consumer_group: str = "dispatchers"
+    msgid_key_prefix: str = "dr:dispatch:msgid"
+    msgid_ttl_seconds: int = 86_400              # 24 hr
+    stream_maxlen: int = 10_000                  # MAXLEN ~ trim (approximate)
+    block_ms: int = 5_000                        # XREADGROUP BLOCK timeout in ms
+
+    # Dispatcher behaviour
+    pel_check_interval_seconds: int = 300        # 5 min PEL sweep
+    stuck_job_timeout_seconds: int = 3_600       # 1 hr before a PEL entry is "stuck"
+    max_concurrent_jobs: int = 10
+    dry_run: bool = False                        # skip K8s spawn (local dev / CI)
+
+    # Kubernetes Job spec
+    k8s_namespace: str = "default"
+    worker_image: str = ""                       # REQUIRED at runtime; validated in dispatcher_main
+    worker_env_secret_name: str = "kadal-worker-env"
+    worker_service_account: str = "kadal-worker"
+    worker_cpu_request: str = "500m"
+    worker_memory_request: str = "1Gi"
+    worker_cpu_limit: str = "2000m"
+    worker_memory_limit: str = "4Gi"
+    worker_job_ttl_seconds: int = 300            # ttlSecondsAfterFinished
+    worker_backoff_limit: int = 0                # dispatcher handles retries via PEL
+
+
 # ---------------------------------------------------------------------------
 # Root settings (reads from environment / .env)
 # ---------------------------------------------------------------------------
@@ -195,6 +231,9 @@ class Settings(BaseSettings):
     tavily_api_key: str
     serper_api_key: str
     content_lake_url: str = ""          # optional — only used when tools.content_lake=true
+    cl_search_endpoint: str = ""        # CL_SEARCH_END_POINT — overrides content_lake_url + /v2/search
+    content_lake_timeout: float = 30.0  # seconds; replaces hardcoded _TIMEOUT in content_lake.py
+    lor_endpoint: str = ""              # LOR_END_POINT — for object metadata → S3 URL lookup
 
     # ------------------------------------------------------------------
     # Langfuse observability (self-hosted)
@@ -254,6 +293,11 @@ class Settings(BaseSettings):
     # Redis TTLs
     # ------------------------------------------------------------------
     redis_ttls: RedisTTLConfig = RedisTTLConfig()
+
+    # ------------------------------------------------------------------
+    # Dispatcher (Redis Streams → K8s Job spawner)
+    # ------------------------------------------------------------------
+    dispatcher: DispatcherConfig = Field(default_factory=DispatcherConfig)
 
     # ------------------------------------------------------------------
     # Resilience / partial-failure

@@ -23,7 +23,8 @@ class PlanningJobStatus(str, Enum):
 
 
 class ExecutionJobStatus(str, Enum):
-    QUEUED    = "QUEUED"
-    RUNNING   = "RUNNING"
-    COMPLETED = "COMPLETED"
-    FAILED    = "FAILED"
+    QUEUED          = "QUEUED"
+    RUNNING         = "RUNNING"
+    COMPLETED       = "COMPLETED"
+    PARTIAL_SUCCESS = "PARTIAL_SUCCESS"
+    FAILED          = "FAILED"

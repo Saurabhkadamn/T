@@ -22,6 +22,16 @@ class ChatMessageModel(BaseModel):
     content: str = Field(..., max_length=10000)
 
 
+class UploadedFileRef(BaseModel):
+    """A reference to an uploaded file object."""
+    object_id: str = Field(..., min_length=1, max_length=256)
+    filename: str = Field(default="", max_length=512)
+    mime_type: str = Field(default="", max_length=128)
+
+
+_VALID_TOOLS = {"web", "tavily", "arxiv", "content_lake", "files"}
+
+
 # ---------------------------------------------------------------------------
 # POST /api/deepresearch/plan
 # ---------------------------------------------------------------------------
@@ -53,10 +63,20 @@ class PlanRequest(BaseModel):
 
     # Conversation history passed directly by the caller (not fetched from MongoDB)
     chat_history: list[ChatMessageModel] = Field(default_factory=list)
-    # Attached files: [{object_id, filename, mime_type, ...}]
-    objects: list[dict[str, str]] = Field(default_factory=list)
+    # Attached files: [{object_id, filename, mime_type}]
+    objects: list[UploadedFileRef] = Field(default_factory=list)
     # Tool selection: ["web", "arxiv", "content_lake", "files"]
     tools: list[str] = Field(default_factory=list)
+
+    @field_validator("tools", mode="before")
+    @classmethod
+    def validate_tools(cls, v: list) -> list:
+        invalid = [t for t in v if t not in _VALID_TOOLS]
+        if invalid:
+            raise ValueError(
+                f"Unknown tool(s): {invalid}. Allowed: {sorted(_VALID_TOOLS)}"
+            )
+        return v
 
     # Mode 2: answers to the clarification questions from the previous response
     clarification_answers: list[str] = Field(default_factory=list)
@@ -111,7 +131,7 @@ class RunRequest(BaseModel):
     Loads the approved plan from deep_research_jobs by job_id and queues execution.
     Auth (tenant_id + user_id) comes from the Keycloak Bearer token.
     """
-    job_id: str
+    job_id: str = Field(..., pattern=r"^[0-9a-f]{24}$")
     action: Literal["approve", "cancel"] = "approve"
 
 
@@ -132,7 +152,7 @@ class StatusResponse(BaseModel):
         "PLAN_INITIATED", "NEED_CLARIFICATION", "PLAN_READY",
         "PLAN_EDIT_REQUESTED", "PLAN_CANCELED",
         # DB execution statuses
-        "QUEUED", "RUNNING", "COMPLETED", "FAILED",
+        "QUEUED", "RUNNING", "COMPLETED", "PARTIAL_SUCCESS", "FAILED",
         # streaming-only statuses (worker → Redis → client, not stored in MongoDB)
         "initializing", "researching", "fusing", "writing", "reviewing", "exporting",
         "unknown",
@@ -147,7 +167,7 @@ class StatusResponse(BaseModel):
 # GET /api/deepresearch/reports[/{report_id}]
 # ---------------------------------------------------------------------------
 
-_ReportStatus = Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED", "unknown"]
+_ReportStatus = Literal["QUEUED", "RUNNING", "COMPLETED", "PARTIAL_SUCCESS", "FAILED", "unknown"]
 
 
 class ReportListItem(BaseModel):

@@ -23,7 +23,7 @@ from typing import Literal, Optional, TypedDict
 
 DepthLevel = Literal["surface", "intermediate", "in-depth"]
 
-SourceType = Literal["web", "arxiv", "content_lake", "files"]
+SourceType = Literal["web", "tavily", "arxiv", "content_lake", "files"]
 
 PlanningStatus = Literal[
     "pending",             # initial state, not yet started

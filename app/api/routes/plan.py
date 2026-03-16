@@ -198,10 +198,11 @@ async def _save_job_doc(
         },
         "uploaded_files": result.get("uploaded_files", []),
         "tools_enabled": {
-            "web": "web" in (result.get("source_scope") or []),
-            "arxiv": "arxiv" in (result.get("source_scope") or []),
+            "web":          "web"          in (result.get("source_scope") or []),
+            "tavily":       "tavily"       in (result.get("source_scope") or []),
+            "arxiv":        "arxiv"        in (result.get("source_scope") or []),
             "content_lake": "content_lake" in (result.get("source_scope") or []),
-            "files": "files" in (result.get("source_scope") or []),
+            "files":        "files"        in (result.get("source_scope") or []),
         },
         "planning_state": _extract_planning_state_subdoc(result),
         "metadata": {
@@ -291,16 +292,16 @@ async def plan(
         # Map objects → uploaded_files (state expects list with object_id, filename, mime_type)
         uploaded_files = [
             {
-                "object_id": obj.get("object_id", ""),
-                "filename": obj.get("filename", ""),
-                "mime_type": obj.get("mime_type", ""),
+                "object_id": obj.object_id,
+                "filename": obj.filename,
+                "mime_type": obj.mime_type,
             }
             for obj in body.objects
-            if obj.get("object_id")
         ]
 
-        # Map tools → source_scope; always include "web" as minimum
-        _valid_tools = {"web", "arxiv", "content_lake", "files"}
+        # Map tools → source_scope; always include "web" as minimum.
+        # "tavily" is a provider choice for web search — kept alongside "web".
+        _valid_tools = {"web", "tavily", "arxiv", "content_lake", "files"}
         source_scope = [t for t in body.tools if t in _valid_tools]
         if "web" not in source_scope:
             source_scope.insert(0, "web")
@@ -394,6 +395,15 @@ async def plan(
                     plan=saved_state.get("plan"),
                     checklist=saved_state.get("checklist") or [],
                     max_revisions_reached=True,
+                )
+
+            if not saved_state.get("plan"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Job {job_id} has no approved plan to revise. "
+                        "Complete the planning phase first."
+                    ),
                 )
 
             initial_state = {**saved_state}  # type: ignore[assignment]
@@ -516,20 +526,27 @@ async def plan(
     needs_clarification: bool = result.get("needs_clarification", False)
 
     analysis_dict: dict | None = None
-    if result.get("depth_of_research") or result.get("audience"):
+    if graph_status not in ("failed", "unknown", "pending"):
         analysis_dict = {
-            "depth_of_research": result.get("depth_of_research", "intermediate"),
+            "depth_of_research": result.get("depth_of_research") or "intermediate",
             "audience": result.get("audience", ""),
             "objective": result.get("objective", ""),
             "domain": result.get("domain", ""),
             "recency_scope": result.get("recency_scope", ""),
-            "source_scope": result.get("source_scope", []),
-            "assumptions": result.get("assumptions", []),
+            "source_scope": result.get("source_scope") or [],
+            "assumptions": result.get("assumptions") or [],
         }
+
+    if graph_status == "awaiting_approval":
+        response_status: str = PlanningJobStatus.PLAN_READY
+    elif graph_status == "needs_clarification":
+        response_status = PlanningJobStatus.NEED_CLARIFICATION
+    else:
+        response_status = graph_status
 
     return PlanResponse(
         job_id=job_id,
-        status=graph_status,
+        status=response_status,
         needs_clarification=needs_clarification,
         clarification_questions=result.get("clarification_questions") or [],
         refined_topic=result.get("refined_topic") or None,

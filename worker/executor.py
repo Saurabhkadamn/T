@@ -49,6 +49,33 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+async def _ack_stream_message(redis_client: aioredis.Redis, job_id: str) -> None:
+    """XACK the stream message after job completion (success or failure).
+
+    Idempotent — safe if msg_id key doesn't exist (local dev / re-run).
+    Non-fatal if it fails: PEL sweep in the dispatcher will XCLAIM and clean up
+    after the stuck_job_timeout elapses.
+    """
+    try:
+        msgid_key = f"{settings.dispatcher.msgid_key_prefix}:{job_id}"
+        msg_id = await redis_client.get(msgid_key)
+        if msg_id:
+            await redis_client.xack(
+                settings.dispatcher.stream_name,
+                settings.dispatcher.consumer_group,
+                msg_id,
+            )
+            await redis_client.delete(msgid_key)
+            logger.info("executor: XACK job_id=%s msg_id=%s", job_id, msg_id)
+        else:
+            logger.debug(
+                "executor: no stream msg_id for job_id=%s (local dev?)", job_id
+            )
+    except Exception as exc:
+        logger.error("executor: XACK failed for job_id=%s — %s", job_id, exc)
+        # Non-fatal: PEL sweep will XCLAIM and clean up after timeout
+
+
 async def run(job_id: str) -> None:
     """Entry point called by worker/main.py.
 
@@ -102,10 +129,11 @@ async def run(job_id: str) -> None:
 
         tools_raw: dict = job_doc.get("tools_enabled", {})
         tools_enabled: ToolsEnabled = {
-            "web": bool(tools_raw.get("web", True)),
-            "arxiv": bool(tools_raw.get("arxiv", True)),
+            "web":          bool(tools_raw.get("web", True)),
+            "tavily":       bool(tools_raw.get("tavily", False)),
+            "arxiv":        bool(tools_raw.get("arxiv", True)),
             "content_lake": bool(tools_raw.get("content_lake", False)),
-            "files": bool(tools_raw.get("files", False)),
+            "files":        bool(tools_raw.get("files", False)),
         }
 
         plan = job_doc.get("plan", {})
@@ -288,10 +316,32 @@ async def run(job_id: str) -> None:
 
         await streamer.publish_completed(report_id, presigned_url)
 
-        # Update MongoDB job status to completed
+        # ── Determine final job status ─────────────────────────────────────
+        # 1. Respect whatever status the exporter node set (COMPLETED / PARTIAL_SUCCESS).
+        # 2. Override with FAILED if too many sections failed (partial_failure_threshold).
+        exporter_status = final_state.get("status", ExecutionJobStatus.COMPLETED)
+        terminal_statuses = (ExecutionJobStatus.COMPLETED, ExecutionJobStatus.PARTIAL_SUCCESS, ExecutionJobStatus.FAILED)
+        if exporter_status not in terminal_statuses:
+            exporter_status = ExecutionJobStatus.COMPLETED
+
+        # Check section failure fraction against configured threshold (Bug 6).
+        failed_count = sum(
+            1 for r in final_state.get("section_results", []) if r.get("status") == "failed"
+        )
+        total_count = max(len(sections), 1)
+        failure_fraction = failed_count / total_count
+        if failure_fraction > settings.partial_failure_threshold:
+            logger.warning(
+                "executor: failure fraction %.2f > threshold %.2f — marking FAILED (job_id=%s)",
+                failure_fraction, settings.partial_failure_threshold, job_id,
+            )
+            final_job_status = ExecutionJobStatus.FAILED
+        else:
+            final_job_status = exporter_status
+
         await db["Deep_Research_Jobs"].update_one(
             {"_id": ObjectId(job_id), "tenant_id": tenant_id},
-            {"$set": {"status": ExecutionJobStatus.COMPLETED, "progress": 100, "updated_at": _now_iso()}},
+            {"$set": {"status": final_job_status, "progress": 100, "updated_at": _now_iso()}},
         )
 
         # Update daily rate-limit hash: mark job as completed (not failed → counts toward limit)
@@ -356,10 +406,14 @@ async def run(job_id: str) -> None:
                 pass
         if checkpointer is not None:
             try:
-                checkpointer.client.close()
-            except Exception:
-                pass
+                if hasattr(checkpointer, "aclose"):
+                    await checkpointer.aclose()
+                elif hasattr(checkpointer, "client"):
+                    checkpointer.client.close()
+            except Exception as exc:
+                logger.warning("executor: checkpointer close failed — %s", exc)
         if redis_client is not None:
+            await _ack_stream_message(redis_client, job_id)
             try:
                 await redis_client.aclose()
             except Exception:

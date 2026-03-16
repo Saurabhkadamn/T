@@ -47,71 +47,14 @@ from langchain_core.runnables import RunnableConfig
 from app.config import settings
 from app.llm_factory import get_llm
 from app.tracing import node_span
+from graphs.execution.prompts.report_writer import (
+    _SYSTEM_PROMPT,
+    _INITIAL_USER_TEMPLATE,
+    _REVISION_USER_TEMPLATE,
+)
 from graphs.execution.state import Citation, ExecutionState
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Prompts
-# ---------------------------------------------------------------------------
-
-_SYSTEM_PROMPT = """\
-You are an expert research report writer producing a professional HTML report.
-
-Guidelines:
-- Use semantic HTML: <article>, <section>, <h2>, <h3>, <p>, <ul>, <ol>, <blockquote>.
-- Add inline citation markers in square brackets [1], [2] that match the bibliography.
-- Write in a formal, authoritative tone appropriate for the target audience.
-- Cover all sections from the research plan in order.
-- Begin the report with an Executive Summary.
-- End with a Bibliography / References section listing all cited sources.
-- Do NOT include inline CSS, <style> tags, or JavaScript.
-- Output ONLY the HTML — start with <article> and end with </article>.
-"""
-
-_INITIAL_USER_TEMPLATE = """\
-## Research Topic
-{topic}
-
-## Research Plan
-{plan_outline}
-
-## Quality Checklist (all items must be addressed)
-{checklist}
-
-## Citation Index
-{citation_index}
-
-## Synthesised Research Knowledge
-{fused_knowledge}
-
----
-
-Generate the complete HTML report now.
-Follow the checklist.  Cite sources using [N] markers.
-Start with <article> — do not include <html>, <head>, or <body>.
-"""
-
-_REVISION_USER_TEMPLATE = """\
-## Research Topic
-{topic}
-
-## Reviewer Feedback (address ALL points)
-{review_feedback}
-
-## Original Report (revise this)
-{report_html}
-
-## Citation Index
-{citation_index}
-
----
-
-Revise the report to address every point of feedback.
-Return the complete revised HTML — not just the changed sections.
-Start with <article> and end with </article>.
-"""
 
 
 # ---------------------------------------------------------------------------
